@@ -2,6 +2,26 @@
 command = "cargo"
 args = ["clean"]
 
+[tasks.install-targets.linux]
+command = "rustup"
+args = [
+  "target",
+  "add",
+  "i686-pc-windows-gnu",
+  "x86_64-pc-windows-gnu",
+  "i686-unknown-linux-gnu",
+]
+
+[tasks.install-targets.windows]
+command = "rustup"
+args = [
+  "target",
+  "add",
+  "i686-pc-windows-msvc",
+  "x86_64-pc-windows-msvc",
+  "i686-unknown-linux-gnu",
+]
+
 [tasks.remove-out.linux]
 command = "rm"
 args = ["-rf", "out"]
@@ -58,23 +78,25 @@ script_runner = "powershell"
 script_extension = "ps1"
 script = '''
 New-Item -ItemType Directory -Path out -Force -ErrorAction SilentlyContinue
-cp target/i686-pc-windows-msvc/release/websocket1c.dll out/Websocket1CAddIn_x32.dll
-cp target/x86_64-pc-windows-msvc/release/websocket1c.dll out/Websocket1CAddIn_x64.dll
-cp target/i686-unknown-linux-gnu/release/libwebsocket1c.so out/Websocket1CAddIn_x32.so
-cp target/x86_64-unknown-linux-gnu/release/libwebsocket1c.so out/Websocket1CAddIn_x64.so
+cp target/i686-pc-windows-msvc/release/webtransport.dll out/WebTransportAddIn_x32.dll
+cp target/x86_64-pc-windows-msvc/release/webtransport.dll out/WebTransportAddIn_x64.dll
+cp target/i686-unknown-linux-gnu/release/libwebtransport.so out/WebTransportAddIn_x32.so
+cp target/x86_64-unknown-linux-gnu/release/libwebtransport.so out/WebTransportAddIn_x64.so
 cp Manifest.xml out/
-Compress-Archive -DestinationPath out/Websocket1CAddIn.zip -Path out/Websocket1CAddIn_x64.dll, out/Websocket1CAddIn_x32.dll, out/Websocket1CAddIn_x32.so, out/Websocket1CAddIn_x64.so, out/Manifest.xml -Force
+Compress-Archive -DestinationPath out/WebTransportAddIn.zip -Path out/WebTransportAddIn_x64.dll, out/WebTransportAddIn_x32.dll, out/WebTransportAddIn_x32.so, out/WebTransportAddIn_x64.so, out/Manifest.xml -Force
+Copy-Item -LiteralPath out/WebTransportAddIn.zip -Destination demo/Demo/Templates/Компонента/Ext/Template.bin -Force
 '''
 
 [tasks.pack-to-zip.linux]
 script = '''
 mkdir -p out
-cp target/i686-pc-windows-gnu/release/websocket1c.dll out/Websocket1CAddIn_x32.dll
-cp target/x86_64-pc-windows-gnu/release/websocket1c.dll out/Websocket1CAddIn_x64.dll
-cp target/i686-unknown-linux-gnu/release/libwebsocket1c.so out/Websocket1CAddIn_x32.so
-cp target/x86_64-unknown-linux-gnu/release/libwebsocket1c.so out/Websocket1CAddIn_x64.so
+cp target/i686-pc-windows-gnu/release/webtransport.dll out/WebTransportAddIn_x32.dll
+cp target/x86_64-pc-windows-gnu/release/webtransport.dll out/WebTransportAddIn_x64.dll
+cp target/i686-unknown-linux-gnu/release/libwebtransport.so out/WebTransportAddIn_x32.so
+cp target/x86_64-unknown-linux-gnu/release/libwebtransport.so out/WebTransportAddIn_x64.so
 cp Manifest.xml out/
-zip -r -j out/Websocket1CAddIn.zip out/Websocket1CAddIn_x64.dll out/Websocket1CAddIn_x32.dll out/Websocket1CAddIn_x32.so out/Websocket1CAddIn_x64.so Manifest.xml
+zip -r -j out/WebTransportAddIn.zip out/WebTransportAddIn_x64.dll out/WebTransportAddIn_x32.dll out/WebTransportAddIn_x32.so out/WebTransportAddIn_x64.so Manifest.xml
+cp out/WebTransportAddIn.zip demo/Demo/Templates/Компонента/Ext/Template.bin
 '''
 
 [tasks.pack]

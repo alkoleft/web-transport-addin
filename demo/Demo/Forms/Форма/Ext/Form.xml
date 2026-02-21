@@ -1,0 +1,141 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:app="http://v8.1c.ru/8.2/managed-application/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:dcscor="http://v8.1c.ru/8.1/data-composition-system/core" xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema" xmlns:dcsset="http://v8.1c.ru/8.1/data-composition-system/settings" xmlns:ent="http://v8.1c.ru/8.1/data/enterprise" xmlns:lf="http://v8.1c.ru/8.2/managed-application/logform" xmlns:pal="http://v8.1c.ru/8.1/data/ui/colors/palette" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.21">
+	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1">
+		<ChildItems>
+			<Button name="ФормаЗапуститьHTTPСервер" id="1">
+				<Type>CommandBarButton</Type>
+				<CommandName>Form.Command.ЗапуститьHTTPСервер</CommandName>
+				<ExtendedTooltip name="ФормаЗапуститьHTTPСерверРасширеннаяПодсказка" id="2"/>
+			</Button>
+			<Button name="ФормаОстановить" id="3">
+				<Type>CommandBarButton</Type>
+				<CommandName>Form.Command.Остановить</CommandName>
+				<ExtendedTooltip name="ФормаОстановитьРасширеннаяПодсказка" id="4"/>
+			</Button>
+			<Button name="ФормаЗапуститьMCPСервер" id="5">
+				<Type>CommandBarButton</Type>
+				<CommandName>Form.Command.ЗапуститьMCPСервер</CommandName>
+				<ExtendedTooltip name="ФормаЗапуститьMCPСерверРасширеннаяПодсказка" id="6"/>
+			</Button>
+			<Button name="ФормаОстановитьMCP" id="7">
+				<Type>CommandBarButton</Type>
+				<CommandName>Form.Command.ОстановитьMCP</CommandName>
+				<ExtendedTooltip name="ФормаОстановитьMCPРасширеннаяПодсказка" id="8"/>
+			</Button>
+		</ChildItems>
+	</AutoCommandBar>
+	<Events>
+		<Event name="OnOpen">ПриОткрытии</Event>
+		<Event name="ExternalEvent">ВнешнееСобытие</Event>
+	</Events>
+	<ChildItems>
+		<InputField name="НомерПорта" id="9">
+			<DataPath>НомерПорта</DataPath>
+			<ExtendedEditMultipleValues>true</ExtendedEditMultipleValues>
+			<ContextMenu name="НомерПортаКонтекстноеМеню" id="10"/>
+			<ExtendedTooltip name="НомерПортаРасширеннаяПодсказка" id="11"/>
+		</InputField>
+		<CheckBoxField name="Логировать" id="13">
+			<DataPath>Логировать</DataPath>
+			<ContextMenu name="ЛогироватьКонтекстноеМеню" id="14"/>
+			<ExtendedTooltip name="ЛогироватьРасширеннаяПодсказка" id="15"/>
+		</CheckBoxField>
+	</ChildItems>
+	<Attributes>
+		<Attribute name="Объект" id="1">
+			<Type>
+				<v8:Type>cfg:ExternalDataProcessorObject.Demo</v8:Type>
+			</Type>
+			<MainAttribute>true</MainAttribute>
+		</Attribute>
+		<Attribute name="НомерПорта" id="2">
+			<Title>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Номер порта</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>xs:decimal</v8:Type>
+				<v8:NumberQualifiers>
+					<v8:Digits>10</v8:Digits>
+					<v8:FractionDigits>0</v8:FractionDigits>
+					<v8:AllowedSign>Any</v8:AllowedSign>
+				</v8:NumberQualifiers>
+			</Type>
+		</Attribute>
+		<Attribute name="Логировать" id="3">
+			<Title>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Логировать</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>xs:boolean</v8:Type>
+			</Type>
+		</Attribute>
+	</Attributes>
+	<Commands>
+		<Command name="ЗапуститьHTTPСервер" id="1">
+			<Title>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Запустить HTTPСервер</v8:content>
+				</v8:item>
+			</Title>
+			<ToolTip>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Запустить HTTPСервер</v8:content>
+				</v8:item>
+			</ToolTip>
+			<Action>ЗапуститьHTTPСервер</Action>
+		</Command>
+		<Command name="Остановить" id="2">
+			<Title>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Остановить</v8:content>
+				</v8:item>
+			</Title>
+			<ToolTip>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Остановить</v8:content>
+				</v8:item>
+			</ToolTip>
+			<Action>Остановить</Action>
+		</Command>
+		<Command name="ЗапуститьMCPСервер" id="3">
+			<Title>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Запустить MCPСервер</v8:content>
+				</v8:item>
+			</Title>
+			<ToolTip>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Запустить MCPСервер</v8:content>
+				</v8:item>
+			</ToolTip>
+			<Action>ЗапуститьMCPСервер</Action>
+		</Command>
+		<Command name="ОстановитьMCP" id="4">
+			<Title>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Остановить MCP</v8:content>
+				</v8:item>
+			</Title>
+			<ToolTip>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Остановить MCP</v8:content>
+				</v8:item>
+			</ToolTip>
+			<Action>ОстановитьMCP</Action>
+		</Command>
+	</Commands>
+</Form>

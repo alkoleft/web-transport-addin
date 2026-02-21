@@ -1,0 +1,55 @@
+name: Build WebTransportAddIn.zip
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+jobs:
+  build-zip:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            mingw-w64 \
+            gcc-multilib \
+            libc6-dev-i386 \
+            zip
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: |
+            i686-pc-windows-gnu
+            x86_64-pc-windows-gnu
+            i686-unknown-linux-gnu
+            x86_64-unknown-linux-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-make
+        run: cargo install cargo-make
+
+      - name: Build package
+        run: cargo make pack
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebTransportAddIn.zip
+          path: out/WebTransportAddIn.zip

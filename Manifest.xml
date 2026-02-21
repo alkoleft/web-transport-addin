@@ -1,7 +1,7 @@
 ﻿<?xml version="1.0" encoding="UTF-8"?>
-<bundle xmlns="http://v8.1c.ru/8.2/addin/bundle" name="Websocket1CAddIn">
-    <component os="Windows" path="Websocket1CAddIn_x32.dll" type="native" arch="i386" />
-    <component os="Windows" path="Websocket1CAddIn_x64.dll" type="native" arch="x86_64" />
-    <component os="Linux" path="Websocket1CAddIn_x32.so" type="native" arch="i386" />
-    <component os="Linux" path="Websocket1CAddIn_x64.so" type="native" arch="x86_64" />
+<bundle xmlns="http://v8.1c.ru/8.2/addin/bundle" name="WebTransportAddIn" version="0.1.3" description="WebSocket/HTTP add-in for 1C">
+    <component os="Windows" path="WebTransportAddIn_x32.dll" type="native" arch="i386" />
+    <component os="Windows" path="WebTransportAddIn_x64.dll" type="native" arch="x86_64" />
+    <component os="Linux" path="WebTransportAddIn_x32.so" type="native" arch="i386" />
+    <component os="Linux" path="WebTransportAddIn_x64.so" type="native" arch="x86_64" />
 </bundle>
