@@ -4,7 +4,7 @@
 
 Проект основан на оригинальном репозитории и шаблоне внешней компоненты на Rust:
 - Первоисточник: https://github.com/dlyubanevich/websocket1c
-- Шаблон компоненты (Rust): https://github.com/medigor/addin1
+- Шаблон компоненты (Rust): https://github.com/medigor/addin1c
 
 ## Состав и имена классов
 
