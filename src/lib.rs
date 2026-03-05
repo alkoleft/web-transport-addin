@@ -1,5 +1,6 @@
 
 mod http;
+mod mcp;
 mod ws;
 mod ws_client;
 use std::{
@@ -52,7 +53,7 @@ pub unsafe extern "C" fn GetClassObject(name: *const u16, component: *mut *mut c
             }
         }
         "mcp" => {
-            let addin = http::McpServerAddIn::new();
+            let addin = mcp::McpAddIn::new();
             if let Ok(addin) = addin {
                 create_component(component, addin)
             } else {
