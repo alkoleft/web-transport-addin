@@ -3,7 +3,7 @@ use std::error::Error;
 use std::sync::{atomic::AtomicU64, Arc, RwLock};
 
 use addin1c::{name, AddinResult, CStr1C, MethodInfo, Methods, PropInfo, SimpleAddin, Variant};
-use jsonschema::{Draft, JSONSchema};
+use jsonschema::{Draft, Validator};
 use serde_json::Value;
 use tokio::runtime::Runtime;
 use tokio::sync::{oneshot, Mutex};
@@ -414,13 +414,12 @@ fn parse_tool(value: Value) -> Result<rmcp::model::Tool, Box<dyn Error>> {
     serde_json::from_value(value).map_err(|err| format!("Некорректный инструмент: {err}").into())
 }
 
-fn compile_schema(schema: Value) -> Result<JSONSchema, Box<dyn Error>> {
-    let mut options = JSONSchema::options();
-    options
+fn compile_schema(schema: Value) -> Result<Validator, Box<dyn Error>> {
+    let options = jsonschema::options()
         .with_draft(Draft::Draft202012)
         .should_validate_formats(true)
         .should_ignore_unknown_formats(false);
     options
-        .compile(&schema)
+        .build(&schema)
         .map_err(|err| format!("Некорректный JSON Schema: {err}").into())
 }

@@ -1,13 +1,13 @@
 use super::{mcp_handler, HttpAddIn};
 use addin1c::{name, AddinResult, CString1C, Variant};
+use axum::body::{to_bytes, Body};
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
+use axum::routing::{get, post};
+use axum::Router;
 use bytes::Bytes;
 use futures_util::stream;
-use hyper::body::to_bytes;
-use hyper::header::{HeaderName, HeaderValue};
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request, Response, Server, StatusCode};
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::{
@@ -23,6 +23,15 @@ pub(super) struct HttpServerState {
     pub(super) shutdown: oneshot::Sender<()>,
     pub(super) _join: tokio::task::JoinHandle<()>,
     response_map: Arc<Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
+}
+
+#[derive(Clone)]
+struct HttpAppState {
+    response_map: Arc<Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
+    counter: Arc<AtomicU64>,
+    connection: Option<&'static addin1c::Connection>,
+    sse_sessions: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>,
+    sse_session_counter: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -68,38 +77,30 @@ impl HttpAddIn {
             .map_err(|err| format!("Некорректный адрес: {err}"))?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let response_map = Arc::new(Mutex::new(HashMap::new()));
-        let counter = self.http_request_counter.clone();
-        let response_map_for_server = response_map.clone();
-        let connection = self.connection;
-        let sse_sessions = self.sse_sessions.clone();
-        let sse_session_counter = self.sse_session_counter.clone();
+        let state = HttpAppState {
+            response_map: response_map.clone(),
+            counter: self.http_request_counter.clone(),
+            connection: self.connection,
+            sse_sessions: self.sse_sessions.clone(),
+            sse_session_counter: self.sse_session_counter.clone(),
+        };
+
+        let listener = self
+            .runtime
+            .block_on(async { tokio::net::TcpListener::bind(addr).await })
+            .map_err(|err| format!("Не удалось запустить HTTP сервер: {err}"))?;
 
         let join = self.runtime.spawn(async move {
-            let make_service = make_service_fn(move |_| {
-                let response_map = response_map_for_server.clone();
-                let counter = counter.clone();
-                let connection = connection;
-                let sse_sessions = sse_sessions.clone();
-                let sse_session_counter = sse_session_counter.clone();
-                async move {
-                    Ok::<_, Infallible>(service_fn(move |req| {
-                        handle_http_request(
-                            req,
-                            response_map.clone(),
-                            counter.clone(),
-                            connection,
-                            sse_sessions.clone(),
-                            sse_session_counter.clone(),
-                        )
-                    }))
-                }
-            });
+            let app = Router::new()
+                .route("/sse", get(handle_sse_request))
+                .route("/message", post(handle_mcp_route))
+                .route("/", get(handle_root))
+                .fallback(handle_http_request)
+                .with_state(state);
 
-            let server = Server::bind(&addr)
-                .serve(make_service)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                });
+            let server = axum::serve(listener, app).with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            });
 
             let _ = server.await;
         });
@@ -213,49 +214,49 @@ impl HttpAddIn {
     }
 }
 
-async fn handle_http_request(
+async fn handle_root() -> Response<Body> {
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from("MCP server"))
+        .unwrap();
+    add_cors_headers(response.headers_mut());
+    response
+}
+
+async fn handle_mcp_route(
+    State(state): State<HttpAppState>,
     req: Request<Body>,
-    response_map: Arc<Mutex<HashMap<String, oneshot::Sender<HttpResponse>>>>,
-    counter: Arc<AtomicU64>,
-    connection: Option<&'static addin1c::Connection>,
-    sse_sessions: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>,
-    sse_session_counter: Arc<AtomicU64>,
-) -> Result<Response<Body>, Infallible> {
-    if req.method() == hyper::Method::OPTIONS {
-        return Ok(cors_preflight_response());
-    }
-    if req.method() == hyper::Method::GET && req.uri().path() == "/sse" {
-        let mut response =
-            handle_sse_request(req, sse_sessions, sse_session_counter, connection).await?;
-        add_cors_headers(response.headers_mut());
-        return Ok(response);
-    }
-    if req.method() == hyper::Method::POST && req.uri().path() == "/message" {
-        let mut response = mcp_handler::handle_mcp_message(req, connection).await?;
-        add_cors_headers(response.headers_mut());
-        return Ok(response);
-    }
-    if req.method() == hyper::Method::GET && req.uri().path() == "/" {
-        let mut response = Response::builder()
-            .status(StatusCode::OK)
-            .body(Body::from("MCP server"))
-            .unwrap();
-        add_cors_headers(response.headers_mut());
-        return Ok(response);
+) -> Response<Body> {
+    let mut response = match mcp_handler::handle_mcp_message(req, state.connection).await {
+        Ok(response) => response,
+        Err(err) => match err {},
+    };
+    add_cors_headers(response.headers_mut());
+    response
+}
+
+async fn handle_http_request(
+    State(state): State<HttpAppState>,
+    req: Request<Body>,
+) -> Response<Body> {
+    if req.method() == Method::OPTIONS {
+        return cors_preflight_response();
     }
 
     let (parts, body) = req.into_parts();
-    let body_bytes = match to_bytes(body).await {
+    let body_bytes = match to_bytes(body, usize::MAX).await {
         Ok(bytes) => bytes,
         Err(_) => {
-            return Ok(Response::builder()
+            let mut response = Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::from("Failed to read request body"))
-                .unwrap())
+                .unwrap();
+            add_cors_headers(response.headers_mut());
+            return response;
         }
     };
 
-    let id = counter.fetch_add(1, Ordering::Relaxed).to_string();
+    let id = state.counter.fetch_add(1, Ordering::Relaxed).to_string();
     let headers = parts
         .headers
         .iter()
@@ -276,27 +277,31 @@ async fn handle_http_request(
 
     let (response_tx, response_rx) = oneshot::channel();
     {
-        let mut map = response_map.lock().await;
+        let mut map = state.response_map.lock().await;
         map.insert(id.clone(), response_tx);
     }
 
-    let Some(connection) = connection else {
-        let mut map = response_map.lock().await;
+    let Some(connection) = state.connection else {
+        let mut map = state.response_map.lock().await;
         map.remove(&id);
-        return Ok(Response::builder()
+        let mut response = Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
             .body(Body::from("Event connection is unavailable"))
-            .unwrap());
+            .unwrap();
+        add_cors_headers(response.headers_mut());
+        return response;
     };
 
     let data = CString1C::from(request.to_json().as_str());
     if !connection.external_event(name!("WebTransport"), name!("HTTP"), data) {
-        let mut map = response_map.lock().await;
+        let mut map = state.response_map.lock().await;
         map.remove(&id);
-        return Ok(Response::builder()
+        let mut response = Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
             .body(Body::from("Event queue is full"))
-            .unwrap());
+            .unwrap();
+        add_cors_headers(response.headers_mut());
+        return response;
     }
 
     match tokio::time::timeout(Duration::from_secs(HTTP_RESPONSE_TIMEOUT_SECS), response_rx).await {
@@ -320,39 +325,44 @@ async fn handle_http_request(
             }
             let mut resp = builder.body(Body::from(response.body)).unwrap();
             add_cors_headers(resp.headers_mut());
-            Ok(resp)
+            resp
         }
-        Ok(Err(_)) => Ok(Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from("Response channel closed"))
-            .unwrap()),
+        Ok(Err(_)) => {
+            let mut response = Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("Response channel closed"))
+                .unwrap();
+            add_cors_headers(response.headers_mut());
+            response
+        }
         Err(_) => {
-            let mut map = response_map.lock().await;
+            let mut map = state.response_map.lock().await;
             map.remove(&id);
             let mut response = Response::builder()
                 .status(StatusCode::GATEWAY_TIMEOUT)
                 .body(Body::from("Handler timeout"))
                 .unwrap();
             add_cors_headers(response.headers_mut());
-            Ok(response)
+            response
         }
     }
 }
 
 async fn handle_sse_request(
+    State(state): State<HttpAppState>,
     req: Request<Body>,
-    sse_sessions: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>,
-    sse_session_counter: Arc<AtomicU64>,
-    connection: Option<&'static addin1c::Connection>,
-) -> Result<Response<Body>, Infallible> {
+) -> Response<Body> {
     let session_id = match get_query_param(req.uri().query().unwrap_or(""), "sessionId") {
         Some(value) => value,
-        None => sse_session_counter.fetch_add(1, Ordering::Relaxed).to_string(),
+        None => state
+            .sse_session_counter
+            .fetch_add(1, Ordering::Relaxed)
+            .to_string(),
     };
     let (tx, rx) = mpsc::unbounded_channel::<String>();
 
     {
-        let mut map = sse_sessions.lock().await;
+        let mut map = state.sse_sessions.lock().await;
         map.insert(session_id.clone(), tx.clone());
     }
 
@@ -365,7 +375,7 @@ async fn handle_sse_request(
     let initial = sse_format_event("endpoint", endpoint.as_str());
     let _ = tx.send(initial);
 
-    if let Some(connection) = connection {
+    if let Some(connection) = state.connection {
         let data = CString1C::from(
             serde_json::json!({
                 "id": session_id,
@@ -380,21 +390,21 @@ async fn handle_sse_request(
 
     let stream = stream::unfold(rx, |mut rx| async {
         match rx.recv().await {
-            Some(item) => Some((Ok::<Bytes, Infallible>(Bytes::from(item)), rx)),
+            Some(item) => Some((Ok::<Bytes, std::io::Error>(Bytes::from(item)), rx)),
             None => None,
         }
     });
 
-    let response = Response::builder()
+    let mut response = Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "text/event-stream")
         .header("Cache-Control", "no-cache")
         .header("Connection", "keep-alive")
         .header("X-Accel-Buffering", "no")
-        .body(Body::wrap_stream(stream))
+        .body(Body::from_stream(stream))
         .unwrap();
-
-    Ok(response)
+    add_cors_headers(response.headers_mut());
+    response
 }
 
 fn sse_format_event(event: &str, data: &str) -> String {
@@ -428,7 +438,7 @@ fn cors_preflight_response() -> Response<Body> {
     response
 }
 
-fn add_cors_headers(headers: &mut hyper::HeaderMap) {
+fn add_cors_headers(headers: &mut HeaderMap) {
     headers.insert(
         "Access-Control-Allow-Origin",
         HeaderValue::from_static("*"),

@@ -1,6 +1,6 @@
 use addin1c::{name, CString1C};
-use hyper::body::to_bytes;
-use hyper::{Body, Request, Response, StatusCode};
+use axum::body::{to_bytes, Body};
+use axum::http::{Request, Response, StatusCode};
 use std::collections::HashMap;
 use std::convert::Infallible;
 
@@ -9,7 +9,7 @@ pub(super) async fn handle_mcp_message(
     connection: Option<&'static addin1c::Connection>,
 ) -> Result<Response<Body>, Infallible> {
     let (parts, body) = req.into_parts();
-    let body_bytes = match to_bytes(body).await {
+    let body_bytes = match to_bytes(body, usize::MAX).await {
         Ok(bytes) => bytes,
         Err(_) => {
             return Ok(Response::builder()

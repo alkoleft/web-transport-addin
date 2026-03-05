@@ -418,11 +418,13 @@ impl ServerHandler for McpBridgeHandler {
                 Some(map) => serde_json::Value::Object(map),
                 None => serde_json::Value::Object(serde_json::Map::new()),
             };
-            if let Err(errors) = entry.schema.validate(&validation_value) {
-                let message = errors
-                    .map(|err| err.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; ");
+            let errors = entry
+                .schema
+                .iter_errors(&validation_value)
+                .map(|err| err.to_string())
+                .collect::<Vec<_>>();
+            if !errors.is_empty() {
+                let message = errors.join("; ");
                 let message = if message.is_empty() {
                     "Invalid params".to_owned()
                 } else {

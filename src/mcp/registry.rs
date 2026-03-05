@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use jsonschema::JSONSchema;
+use jsonschema::Validator;
 use rmcp::model::{Prompt, Resource, Tool};
 
 #[derive(Clone)]
 pub struct ToolEntry {
     pub tool: Tool,
-    pub schema: Arc<JSONSchema>,
+    pub schema: Arc<Validator>,
 }
 
 #[derive(Clone)]
@@ -28,7 +28,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn register_tool(&mut self, tool: Tool, schema: JSONSchema) {
+    pub fn register_tool(&mut self, tool: Tool, schema: Validator) {
         let key = tool.name.to_string();
         self.tools.insert(
             key,
