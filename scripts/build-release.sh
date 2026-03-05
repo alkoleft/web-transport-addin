@@ -19,23 +19,6 @@ require_cmd() {
   command -v "$cmd" >/dev/null 2>&1 || die "Missing command: $cmd"
 }
 
-detect_host_zip() {
-  local os arch os_part arch_part
-  os="$(uname -s)"
-  arch="$(uname -m)"
-  case "$os" in
-    Linux) os_part="linux" ;;
-    MINGW*|MSYS*|CYGWIN*) os_part="windows" ;;
-    *) die "Unsupported host OS: $os" ;;
-  esac
-  case "$arch" in
-    x86_64|amd64) arch_part="x64" ;;
-    i386|i686) arch_part="x32" ;;
-    *) die "Unsupported host arch: $arch" ;;
-  esac
-  printf '%s' "$ROOT_DIR/out/WebTransportAddIn_${os_part}_${arch_part}.zip"
-}
-
 build_zip() {
   require_cmd cargo
   require_cmd zip
@@ -62,7 +45,7 @@ build_demo() {
 
 main() {
   if [[ -z "$OUT_ZIP" ]]; then
-    OUT_ZIP="$(detect_host_zip)"
+    OUT_ZIP="$ROOT_DIR/out/WebTransportAddIn.zip"
   fi
   build_zip
   build_demo
