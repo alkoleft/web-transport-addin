@@ -14,14 +14,13 @@ use axum::routing::get;
 use axum::Router;
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
-use http_body_util::{BodyExt, Full};
 use http_body_util::combinators::BoxBody;
-use rmcp::ErrorData as McpError;
+use http_body_util::{BodyExt, Full};
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, CustomNotification, CustomRequest, CustomResult,
     ErrorCode, GetPromptRequestParams, GetPromptResult, InitializeRequestParams, InitializeResult,
-    ListPromptsResult, ListResourcesResult, ListResourceTemplatesResult, ListToolsResult,
+    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
     PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, ServerCapabilities,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleServer};
@@ -29,11 +28,12 @@ use rmcp::transport::streamable_http_server::session::never::NeverSessionManager
 use rmcp::transport::streamable_http_server::tower::{
     StreamableHttpServerConfig, StreamableHttpService,
 };
+use rmcp::ErrorData as McpError;
 use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
 
-use super::registry::Registry;
+use super::registry::{Registry, ResolveResourceError, ResolvedResource};
 
 pub(super) struct McpServerState {
     pub(super) shutdown: oneshot::Sender<()>,
@@ -264,10 +264,7 @@ fn add_cors_headers(headers: &mut HeaderMap, origin: Option<&str>, allow_any: bo
             "content-type, authorization, mcp-protocol-version, mcp-session-id",
         ),
     );
-    headers.insert(
-        "Access-Control-Max-Age",
-        HeaderValue::from_static("86400"),
-    );
+    headers.insert("Access-Control-Max-Age", HeaderValue::from_static("86400"));
 }
 
 fn normalize_protocol_version<B>(req: &mut Request<B>) {
@@ -276,9 +273,10 @@ fn normalize_protocol_version<B>(req: &mut Request<B>) {
     if let Some(value) = req.headers().get("mcp-protocol-version") {
         let value = value.to_str().ok().unwrap_or_default();
         if value == "2025-11-25" || value.contains("2025-11-25") {
-            let _ = req
-                .headers_mut()
-                .insert("mcp-protocol-version", HeaderValue::from_static(SUPPORTED_VERSION));
+            let _ = req.headers_mut().insert(
+                "mcp-protocol-version",
+                HeaderValue::from_static(SUPPORTED_VERSION),
+            );
             return;
         }
         if !KNOWN_VERSIONS.iter().any(|known| value.contains(known)) {
@@ -297,11 +295,18 @@ struct McpBridgeHandler {
 }
 
 impl McpBridgeHandler {
-    async fn dispatch_request<T>(&self, event: &str, payload: serde_json::Value) -> Result<T, McpError>
+    async fn dispatch_request<T>(
+        &self,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> Result<T, McpError>
     where
         T: serde::de::DeserializeOwned,
     {
-        let request_id = self.request_counter.fetch_add(1, Ordering::Relaxed).to_string();
+        let request_id = self
+            .request_counter
+            .fetch_add(1, Ordering::Relaxed)
+            .to_string();
         let payload = insert_request_id(payload, request_id.clone())?;
 
         let (tx, rx) = oneshot::channel();
@@ -349,11 +354,7 @@ impl McpBridgeHandler {
         Ok(())
     }
 
-    async fn dispatch_notification(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) {
+    async fn dispatch_notification(&self, method: &str, params: Option<serde_json::Value>) {
         let payload = serde_json::json!({
             "method": method,
             "params": params.unwrap_or(serde_json::Value::Null),
@@ -469,7 +470,18 @@ impl ServerHandler for McpBridgeHandler {
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, McpError>> + Send + '_
     {
-        async move { Ok(ListResourceTemplatesResult::with_all_items(Vec::new())) }
+        async move {
+            let resource_templates = {
+                let guard = self
+                    .registry
+                    .read()
+                    .map_err(|_| McpError::internal_error("Registry lock poisoned", None))?;
+                guard.list_resource_templates()
+            };
+            Ok(ListResourceTemplatesResult::with_all_items(
+                resource_templates,
+            ))
+        }
     }
 
     fn read_resource(
@@ -479,17 +491,37 @@ impl ServerHandler for McpBridgeHandler {
     ) -> impl std::future::Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
         async move {
             let uri = request.uri.clone();
-            let exists = {
+            let resolved = {
                 let guard = self
                     .registry
                     .read()
                     .map_err(|_| McpError::internal_error("Registry lock poisoned", None))?;
-                guard.get_resource(uri.as_str())
+                guard.resolve_resource(uri.as_str())
             };
-            if exists.is_none() {
-                return Err(McpError::resource_not_found("resource not found", None));
-            }
-            let payload = serde_json::json!({ "uri": uri });
+
+            let payload = match resolved {
+                Ok(Some(ResolvedResource::Resource(_resource))) => {
+                    serde_json::json!({ "uri": uri })
+                }
+                Ok(Some(ResolvedResource::Template(template))) => serde_json::json!({
+                    "uri": uri,
+                    "uriTemplate": template.template.uri_template,
+                    "arguments": template.arguments,
+                }),
+                Ok(None) => {
+                    return Err(McpError::resource_not_found("resource not found", None));
+                }
+                Err(ResolveResourceError::AmbiguousTemplates { uri, templates }) => {
+                    return Err(McpError::invalid_params(
+                        "resource URI matches multiple templates",
+                        Some(serde_json::json!({
+                            "uri": uri,
+                            "uriTemplates": templates,
+                        })),
+                    ));
+                }
+            };
+
             self.dispatch_request("MCP_RESOURCE_READ", payload).await
         }
     }
@@ -545,14 +577,23 @@ impl ServerHandler for McpBridgeHandler {
         request: CustomRequest,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<CustomResult, McpError>> + Send + '_ {
-        async move { Err(McpError::new(ErrorCode::METHOD_NOT_FOUND, request.method, None)) }
+        async move {
+            Err(McpError::new(
+                ErrorCode::METHOD_NOT_FOUND,
+                request.method,
+                None,
+            ))
+        }
     }
 
     fn on_initialized(
         &self,
         _context: NotificationContext<RoleServer>,
     ) -> impl std::future::Future<Output = ()> + Send + '_ {
-        async move { self.dispatch_notification("notifications/initialized", None).await }
+        async move {
+            self.dispatch_notification("notifications/initialized", None)
+                .await
+        }
     }
 
     fn on_progress(
@@ -583,7 +624,10 @@ impl ServerHandler for McpBridgeHandler {
         &self,
         _context: NotificationContext<RoleServer>,
     ) -> impl std::future::Future<Output = ()> + Send + '_ {
-        async move { self.dispatch_notification("notifications/roots/list_changed", None).await }
+        async move {
+            self.dispatch_notification("notifications/roots/list_changed", None)
+                .await
+        }
     }
 
     fn on_custom_notification(
@@ -607,10 +651,7 @@ fn insert_request_id(
             map.insert("id".to_owned(), serde_json::Value::String(request_id));
             Ok(serde_json::Value::Object(map))
         }
-        _ => Err(McpError::internal_error(
-            "Invalid request payload",
-            None,
-        )),
+        _ => Err(McpError::internal_error("Invalid request payload", None)),
     }
 }
 

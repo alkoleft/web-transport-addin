@@ -135,9 +135,9 @@ impl McpAddIn {
             let sender = map
                 .remove(request_id.as_str())
                 .ok_or_else(|| "Не найден ожидающий ответ запрос".to_owned())?;
-            sender
-                .send(response)
-                .map_err(|_| -> Box<dyn Error> { "Не удалось отправить ответ".to_owned().into() })?;
+            sender.send(response).map_err(|_| -> Box<dyn Error> {
+                "Не удалось отправить ответ".to_owned().into()
+            })?;
             return_value.set_bool(true);
             Ok(())
         })
@@ -199,7 +199,11 @@ impl McpAddIn {
         Ok(())
     }
 
-    fn register_resources(&mut self, json: &mut Variant, return_value: &mut Variant) -> AddinResult {
+    fn register_resources(
+        &mut self,
+        json: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
         let json = json.get_string()?;
         let items = parse_json_items(json.as_str())?;
         let mut guard = self
@@ -215,7 +219,11 @@ impl McpAddIn {
         Ok(())
     }
 
-    fn unregister_resource(&mut self, uri: &mut Variant, return_value: &mut Variant) -> AddinResult {
+    fn unregister_resource(
+        &mut self,
+        uri: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
         let uri = uri.get_string()?;
         let mut guard = self
             .registry
@@ -232,6 +240,50 @@ impl McpAddIn {
             .write()
             .map_err(|_| "Lock poisoned".to_owned())?;
         guard.clear_resources();
+        return_value.set_bool(true);
+        Ok(())
+    }
+
+    fn register_resource_templates(
+        &mut self,
+        json: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
+        let json = json.get_string()?;
+        let items = parse_json_items(json.as_str())?;
+        let mut guard = self
+            .registry
+            .write()
+            .map_err(|_| "Lock poisoned".to_owned())?;
+        for item in items {
+            let template = parse_resource_template(item)?;
+            guard.register_resource_template(template)?;
+        }
+        return_value.set_bool(true);
+        Ok(())
+    }
+
+    fn unregister_resource_template(
+        &mut self,
+        uri_template: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
+        let uri_template = uri_template.get_string()?;
+        let mut guard = self
+            .registry
+            .write()
+            .map_err(|_| "Lock poisoned".to_owned())?;
+        let removed = guard.remove_resource_template(uri_template.as_str());
+        return_value.set_bool(removed);
+        Ok(())
+    }
+
+    fn clear_resource_templates(&mut self, return_value: &mut Variant) -> AddinResult {
+        let mut guard = self
+            .registry
+            .write()
+            .map_err(|_| "Lock poisoned".to_owned())?;
+        guard.clear_resource_templates();
         return_value.set_bool(true);
         Ok(())
     }
@@ -329,6 +381,18 @@ impl SimpleAddin for McpAddIn {
                 method: Methods::Method0(Self::clear_resources),
             },
             MethodInfo {
+                name: name!("ЗарегистрироватьШаблонРесурса"),
+                method: Methods::Method1(Self::register_resource_templates),
+            },
+            MethodInfo {
+                name: name!("СнятьРегистрациюШаблонаРесурса"),
+                method: Methods::Method1(Self::unregister_resource_template),
+            },
+            MethodInfo {
+                name: name!("ОчиститьШаблоныРесурсов"),
+                method: Methods::Method0(Self::clear_resource_templates),
+            },
+            MethodInfo {
                 name: name!("ЗарегистрироватьПромпт"),
                 method: Methods::Method1(Self::register_prompts),
             },
@@ -414,6 +478,11 @@ fn parse_tool(value: Value) -> Result<rmcp::model::Tool, Box<dyn Error>> {
     serde_json::from_value(value).map_err(|err| format!("Некорректный инструмент: {err}").into())
 }
 
+fn parse_resource_template(value: Value) -> Result<rmcp::model::ResourceTemplate, Box<dyn Error>> {
+    serde_json::from_value(value)
+        .map_err(|err| format!("Некорректный шаблон ресурса: {err}").into())
+}
+
 fn compile_schema(schema: Value) -> Result<Validator, Box<dyn Error>> {
     let options = jsonschema::options()
         .with_draft(Draft::Draft202012)
@@ -422,4 +491,39 @@ fn compile_schema(schema: Value) -> Result<Validator, Box<dyn Error>> {
     options
         .build(&schema)
         .map_err(|err| format!("Некорректный JSON Schema: {err}").into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_json_items, parse_resource_template};
+    use serde_json::json;
+
+    #[test]
+    fn parse_json_items_accepts_single_object_and_arrays() {
+        let one = parse_json_items(r#"{"uriTemplate":"str://users/{id}","name":"users"}"#)
+            .expect("single object should parse");
+        assert_eq!(one.len(), 1);
+
+        let many = parse_json_items(
+            r#"[{"uriTemplate":"str://users/{id}","name":"users"},{"uriTemplate":"str://posts/{id}","name":"posts"}]"#,
+        )
+        .expect("array should parse");
+        assert_eq!(many.len(), 2);
+    }
+
+    #[test]
+    fn parse_resource_template_requires_rmcp_shape() {
+        let template = parse_resource_template(json!({
+            "uriTemplate": "str://users/{id}",
+            "name": "users",
+        }))
+        .expect("template should parse");
+        assert_eq!(template.uri_template, "str://users/{id}");
+
+        let error = parse_resource_template(json!({
+            "name": "users",
+        }))
+        .expect_err("invalid template should fail");
+        assert!(error.to_string().contains("Некорректный шаблон ресурса"));
+    }
 }
