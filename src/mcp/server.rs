@@ -23,8 +23,8 @@ use rmcp::model::{
     ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
     PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, ServerCapabilities,
 };
-use rmcp::service::{NotificationContext, RequestContext, RoleServer};
-use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
+use rmcp::service::{ClientSink, NotificationContext, RequestContext, RoleServer};
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::tower::{
     StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -38,6 +38,16 @@ use super::registry::{Registry, ResolveResourceError, ResolvedResource};
 pub(super) struct McpServerState {
     pub(super) shutdown: oneshot::Sender<()>,
     pub(super) _join: tokio::task::JoinHandle<()>,
+    handler: Arc<McpBridgeHandler>,
+}
+
+impl McpServerState {
+    pub(super) async fn broadcast_notification(
+        &self,
+        notification: rmcp::model::ServerNotification,
+    ) {
+        self.handler.broadcast_notification(notification).await;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +111,7 @@ pub(super) fn start_mcp_server(
     request_counter: Arc<AtomicU64>,
     registry: Arc<RwLock<Registry>>,
     response_timeout: Duration,
+    client_sinks: Arc<Mutex<Vec<ClientSink>>>,
 ) -> Result<McpServerState, Box<dyn Error>> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -110,13 +121,17 @@ pub(super) fn start_mcp_server(
         request_counter,
         registry,
         response_timeout,
+        client_sinks,
     });
 
     let service = StreamableHttpService::new(
-        move || Ok(handler.clone()),
-        Arc::new(NeverSessionManager::default()),
+        {
+            let handler = handler.clone();
+            move || Ok(handler.clone())
+        },
+        Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig {
-            stateful_mode: false,
+            stateful_mode: true,
             json_response: true,
             sse_keep_alive: None,
             sse_retry: None,
@@ -142,6 +157,7 @@ pub(super) fn start_mcp_server(
     Ok(McpServerState {
         shutdown: shutdown_tx,
         _join: join,
+        handler,
     })
 }
 
@@ -292,6 +308,7 @@ struct McpBridgeHandler {
     request_counter: Arc<AtomicU64>,
     registry: Arc<RwLock<Registry>>,
     response_timeout: Duration,
+    client_sinks: Arc<Mutex<Vec<ClientSink>>>,
 }
 
 impl McpBridgeHandler {
@@ -361,6 +378,19 @@ impl McpBridgeHandler {
         });
 
         let _ = self.emit_event("MCP_NOTIFICATION", payload);
+    }
+}
+
+impl McpBridgeHandler {
+    pub(super) async fn broadcast_notification(
+        &self,
+        notification: rmcp::model::ServerNotification,
+    ) {
+        let mut sinks = self.client_sinks.lock().await;
+        sinks.retain(|s| !s.is_transport_closed());
+        for sink in sinks.iter() {
+            let _ = sink.send_notification(notification.clone()).await;
+        }
     }
 }
 
@@ -588,9 +618,14 @@ impl ServerHandler for McpBridgeHandler {
 
     fn on_initialized(
         &self,
-        _context: NotificationContext<RoleServer>,
+        context: NotificationContext<RoleServer>,
     ) -> impl std::future::Future<Output = ()> + Send + '_ {
         async move {
+            {
+                let mut sinks = self.client_sinks.lock().await;
+                sinks.retain(|s| !s.is_transport_closed());
+                sinks.push(context.peer.clone());
+            }
             self.dispatch_notification("notifications/initialized", None)
                 .await
         }

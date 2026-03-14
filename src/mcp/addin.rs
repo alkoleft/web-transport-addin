@@ -4,6 +4,7 @@ use std::sync::{atomic::AtomicU64, Arc, RwLock};
 
 use addin1c::{name, AddinResult, CStr1C, MethodInfo, Methods, PropInfo, SimpleAddin, Variant};
 use jsonschema::{Draft, Validator};
+use rmcp::service::ClientSink;
 use serde_json::Value;
 use tokio::runtime::Runtime;
 use tokio::sync::{oneshot, Mutex};
@@ -11,7 +12,6 @@ use tokio::sync::{oneshot, Mutex};
 use super::registry::Registry;
 use super::server::{parse_allow_list, start_mcp_server, AllowList, McpResponse, McpServerState};
 use crate::VERSION;
-
 pub struct McpAddIn {
     pub(super) connection: Option<&'static addin1c::Connection>,
     pub(super) runtime: Arc<Runtime>,
@@ -20,6 +20,7 @@ pub struct McpAddIn {
     pub(super) request_counter: Arc<AtomicU64>,
     pub(super) allow_list: Arc<RwLock<AllowList>>,
     pub(super) registry: Arc<RwLock<Registry>>,
+    pub(super) client_sinks: Arc<Mutex<Vec<ClientSink>>>,
     last_error: Option<Box<dyn Error>>,
 }
 
@@ -80,6 +81,7 @@ impl McpAddIn {
             self.request_counter.clone(),
             self.registry.clone(),
             std::time::Duration::from_secs(timeout_secs as u64),
+            self.client_sinks.clone(),
         )?;
 
         self.server = Some(server);
@@ -315,6 +317,69 @@ impl McpAddIn {
         Ok(())
     }
 
+    fn notify_tools_changed(&mut self, return_value: &mut Variant) -> AddinResult {
+        let Some(server) = self.server.as_ref() else {
+            return Err("MCP сервер не запущен".to_owned().into());
+        };
+        self.runtime.block_on(
+            server.broadcast_notification(
+                rmcp::model::ServerNotification::ToolListChangedNotification(Default::default()),
+            ),
+        );
+        return_value.set_bool(true);
+        Ok(())
+    }
+
+    fn notify_resources_changed(&mut self, return_value: &mut Variant) -> AddinResult {
+        let Some(server) = self.server.as_ref() else {
+            return Err("MCP сервер не запущен".to_owned().into());
+        };
+        self.runtime.block_on(
+            server.broadcast_notification(
+                rmcp::model::ServerNotification::ResourceListChangedNotification(
+                    Default::default(),
+                ),
+            ),
+        );
+        return_value.set_bool(true);
+        Ok(())
+    }
+
+    fn notify_prompts_changed(&mut self, return_value: &mut Variant) -> AddinResult {
+        let Some(server) = self.server.as_ref() else {
+            return Err("MCP сервер не запущен".to_owned().into());
+        };
+        self.runtime.block_on(
+            server.broadcast_notification(
+                rmcp::model::ServerNotification::PromptListChangedNotification(Default::default()),
+            ),
+        );
+        return_value.set_bool(true);
+        Ok(())
+    }
+
+    fn notify_resource_updated(
+        &mut self,
+        uri: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
+        let Some(server) = self.server.as_ref() else {
+            return Err("MCP сервер не запущен".to_owned().into());
+        };
+        let uri = uri.get_string()?;
+        self.runtime.block_on(
+            server.broadcast_notification(
+                rmcp::model::ServerNotification::ResourceUpdatedNotification(
+                    rmcp::model::ResourceUpdatedNotification::new(
+                        rmcp::model::ResourceUpdatedNotificationParam::new(uri),
+                    ),
+                ),
+            ),
+        );
+        return_value.set_bool(true);
+        Ok(())
+    }
+
     fn clear_prompts(&mut self, return_value: &mut Variant) -> AddinResult {
         let mut guard = self
             .registry
@@ -405,6 +470,22 @@ impl SimpleAddin for McpAddIn {
                 method: Methods::Method0(Self::clear_prompts),
             },
             MethodInfo {
+                name: name!("УведомитьОбИзмененииИнструментов"),
+                method: Methods::Method0(Self::notify_tools_changed),
+            },
+            MethodInfo {
+                name: name!("УведомитьОбИзмененииРесурсов"),
+                method: Methods::Method0(Self::notify_resources_changed),
+            },
+            MethodInfo {
+                name: name!("УведомитьОбИзмененииПромптов"),
+                method: Methods::Method0(Self::notify_prompts_changed),
+            },
+            MethodInfo {
+                name: name!("УведомитьОбОбновленииРесурса"),
+                method: Methods::Method1(Self::notify_resource_updated),
+            },
+            MethodInfo {
                 name: name!("Версия"),
                 method: Methods::Method0(Self::version),
             },
@@ -430,6 +511,7 @@ impl Default for McpAddIn {
             request_counter: Arc::new(AtomicU64::new(1)),
             allow_list: Arc::new(RwLock::new(AllowList::default_local())),
             registry: Arc::new(RwLock::new(Registry::default())),
+            client_sinks: Arc::new(Mutex::new(Vec::new())),
             runtime: Arc::new(Runtime::new().unwrap()),
         }
     }
