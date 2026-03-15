@@ -3,6 +3,7 @@ use std::error::Error;
 use std::sync::{atomic::AtomicU64, Arc, RwLock};
 
 use addin1c::{name, AddinResult, CStr1C, MethodInfo, Methods, PropInfo, SimpleAddin, Variant};
+#[cfg(feature = "validate-schema")]
 use jsonschema::{Draft, Validator};
 use rmcp::service::ClientSink;
 use serde_json::Value;
@@ -176,9 +177,16 @@ impl McpAddIn {
             .map_err(|_| "Lock poisoned".to_owned())?;
         for item in items {
             let tool = parse_tool(item)?;
-            let schema_value = Value::Object(tool.input_schema.as_ref().clone());
-            let schema = compile_schema(schema_value)?;
-            guard.register_tool(tool, schema);
+            #[cfg(feature = "validate-schema")]
+            {
+                let schema_value = Value::Object(tool.input_schema.as_ref().clone());
+                let schema = compile_schema(schema_value)?;
+                guard.register_tool(tool, schema);
+            }
+            #[cfg(not(feature = "validate-schema"))]
+            {
+                guard.register_tool(tool);
+            }
         }
         return_value.set_bool(true);
         Ok(())
@@ -614,6 +622,7 @@ fn parse_resource_template(value: Value) -> Result<rmcp::model::ResourceTemplate
         .map_err(|err| format!("Некорректный шаблон ресурса: {err}").into())
 }
 
+#[cfg(feature = "validate-schema")]
 fn compile_schema(schema: Value) -> Result<Validator, Box<dyn Error>> {
     let options = jsonschema::options()
         .with_draft(Draft::Draft202012)

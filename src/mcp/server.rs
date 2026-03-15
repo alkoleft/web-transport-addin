@@ -633,7 +633,7 @@ impl ServerHandler for McpBridgeHandler {
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
         async move {
-            let entry = {
+            let _entry = {
                 let guard = self
                     .registry
                     .read()
@@ -642,23 +642,26 @@ impl ServerHandler for McpBridgeHandler {
             }
             .ok_or_else(|| McpError::invalid_params("tool not found", None))?;
 
-            let validation_value = match request.arguments.clone() {
-                Some(map) => serde_json::Value::Object(map),
-                None => serde_json::Value::Object(serde_json::Map::new()),
-            };
-            let errors = entry
-                .schema
-                .iter_errors(&validation_value)
-                .map(|err| err.to_string())
-                .collect::<Vec<_>>();
-            if !errors.is_empty() {
-                let message = errors.join("; ");
-                let message = if message.is_empty() {
-                    "Invalid params".to_owned()
-                } else {
-                    message
+            #[cfg(feature = "validate-schema")]
+            {
+                let validation_value = match request.arguments.clone() {
+                    Some(map) => serde_json::Value::Object(map),
+                    None => serde_json::Value::Object(serde_json::Map::new()),
                 };
-                return Err(McpError::invalid_params(message, None));
+                let errors = _entry
+                    .schema
+                    .iter_errors(&validation_value)
+                    .map(|err| err.to_string())
+                    .collect::<Vec<_>>();
+                if !errors.is_empty() {
+                    let message = errors.join("; ");
+                    let message = if message.is_empty() {
+                        "Invalid params".to_owned()
+                    } else {
+                        message
+                    };
+                    return Err(McpError::invalid_params(message, None));
+                }
             }
 
             let args_payload = match request.arguments {
@@ -1010,9 +1013,16 @@ mod tests {
             }
         }))
         .unwrap();
-        let schema_value = serde_json::Value::Object(tool.input_schema.as_ref().clone());
-        let schema = jsonschema::validator_for(&schema_value).unwrap();
-        registry.register_tool(tool, schema);
+        #[cfg(feature = "validate-schema")]
+        {
+            let schema_value = serde_json::Value::Object(tool.input_schema.as_ref().clone());
+            let schema = jsonschema::validator_for(&schema_value).unwrap();
+            registry.register_tool(tool, schema);
+        }
+        #[cfg(not(feature = "validate-schema"))]
+        {
+            registry.register_tool(tool);
+        }
         registry
     }
 

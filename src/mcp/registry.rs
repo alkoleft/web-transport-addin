@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+#[cfg(feature = "validate-schema")]
 use std::sync::Arc;
 
+#[cfg(feature = "validate-schema")]
 use jsonschema::Validator;
 use rmcp::model::{Prompt, Resource, ResourceTemplate, Tool};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -10,6 +12,7 @@ use super::resource_template::{ResourceTemplateError, ResourceTemplateMatcher};
 #[derive(Clone)]
 pub struct ToolEntry {
     pub tool: Tool,
+    #[cfg(feature = "validate-schema")]
     pub schema: Arc<Validator>,
 }
 
@@ -55,6 +58,7 @@ pub struct Registry {
 }
 
 impl Registry {
+    #[cfg(feature = "validate-schema")]
     pub fn register_tool(&mut self, tool: Tool, schema: Validator) {
         let key = tool.name.to_string();
         self.tools.insert(
@@ -64,6 +68,12 @@ impl Registry {
                 schema: Arc::new(schema),
             },
         );
+    }
+
+    #[cfg(not(feature = "validate-schema"))]
+    pub fn register_tool(&mut self, tool: Tool) {
+        let key = tool.name.to_string();
+        self.tools.insert(key, ToolEntry { tool });
     }
 
     pub fn remove_tool(&mut self, name: &str) -> bool {
