@@ -9,7 +9,10 @@ use std::sync::{
 use std::time::Duration;
 
 use addin1c::{name, CString1C};
+use axum::body::Body;
+use axum::extract::Request as AxumRequest;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
+use axum::middleware::{self, Next};
 use axum::routing::get;
 use axum::Router;
 use bytes::Bytes;
@@ -143,7 +146,8 @@ pub(super) fn start_mcp_server(
 
     let app = Router::new()
         .route("/", get(|| async { "MCP server" }))
-        .route_service("/mcp", service);
+        .route_service("/mcp", service)
+        .layer(middleware::from_fn(intercept_orphan_initialized));
 
     let listener = runtime.block_on(async { tokio::net::TcpListener::bind(address).await })?;
 
@@ -153,6 +157,79 @@ pub(super) fn start_mcp_server(
         });
         let _ = server.await;
     });
+
+    Ok(McpServerState {
+        shutdown: shutdown_tx,
+        _join: join,
+        handler,
+    })
+}
+
+#[cfg(test)]
+fn start_mcp_server_with_listener(
+    runtime: Arc<tokio::runtime::Runtime>,
+    listener: std::net::TcpListener,
+    connection: Option<&'static addin1c::Connection>,
+    allow_list: Arc<RwLock<AllowList>>,
+    response_map: Arc<Mutex<HashMap<String, oneshot::Sender<McpResponse>>>>,
+    request_counter: Arc<AtomicU64>,
+    registry: Arc<RwLock<Registry>>,
+    response_timeout: Duration,
+    client_sinks: Arc<Mutex<Vec<ClientSink>>>,
+) -> Result<McpServerState, Box<dyn Error>> {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    let handler = Arc::new(McpBridgeHandler {
+        connection,
+        response_map,
+        request_counter,
+        registry,
+        response_timeout,
+        client_sinks,
+    });
+
+    let service = StreamableHttpService::new(
+        {
+            let handler = handler.clone();
+            move || Ok(handler.clone())
+        },
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig {
+            stateful_mode: true,
+            json_response: true,
+            sse_keep_alive: None,
+            sse_retry: None,
+            cancellation_token: CancellationToken::new(),
+        },
+    );
+
+    let service = AllowListLayer { allow_list }.layer(service);
+
+    let app = Router::new()
+        .route("/", get(|| async { "MCP server" }))
+        .route_service("/mcp", service)
+        .layer(middleware::from_fn(intercept_orphan_initialized));
+
+    listener.set_nonblocking(true)?;
+
+    // Convert and serve entirely within the server's own runtime to avoid
+    // calling block_on from a thread that already has a runtime context.
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let join = runtime.spawn(async move {
+        let tokio_listener = match tokio::net::TcpListener::from_std(listener) {
+            Ok(l) => { let _ = ready_tx.send(Ok(())); l }
+            Err(e) => { let _ = ready_tx.send(Err(e.to_string())); return; }
+        };
+        let server = axum::serve(tokio_listener, app).with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+        });
+        let _ = server.await;
+    });
+
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("Server did not start: {e}"))?
+        .map_err(|e| format!("Listener conversion failed: {e}"))?;
 
     Ok(McpServerState {
         shutdown: shutdown_tx,
@@ -246,10 +323,90 @@ where
             }
 
             let mut response = inner.call(req).await?;
+            response = maybe_convert_sse_to_json(response).await;
             add_cors_headers(response.headers_mut(), origin.as_deref(), allow_any);
             Ok(response)
         })
     }
+}
+
+async fn maybe_convert_sse_to_json(response: BoxResponse) -> BoxResponse {
+    let is_sse = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/event-stream"))
+        .unwrap_or(false);
+    let has_session_id = response.headers().contains_key("mcp-session-id");
+
+    if !is_sse || !has_session_id {
+        return response;
+    }
+
+    let session_id = response
+        .headers()
+        .get("mcp-session-id")
+        .cloned();
+
+    let (parts, body) = response.into_parts();
+    let bytes = match body.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(_) => return Response::from_parts(parts, Full::new(Bytes::new()).boxed()),
+    };
+
+    // Extract JSON from SSE "data: {...}" line
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(s) => s,
+        Err(_) => return Response::from_parts(parts, Full::new(bytes).boxed()),
+    };
+    let json_data = text
+        .lines()
+        .find(|line| line.starts_with("data:"))
+        .map(|line| line["data:".len()..].trim());
+
+    let Some(json) = json_data else {
+        return Response::from_parts(parts, Full::new(bytes).boxed());
+    };
+
+    let mut builder = Response::builder()
+        .status(parts.status)
+        .header("content-type", "application/json");
+    if let Some(sid) = session_id {
+        builder = builder.header("mcp-session-id", sid);
+    }
+    builder
+        .body(Full::new(Bytes::copy_from_slice(json.as_bytes())).boxed())
+        .unwrap_or_else(|_| Response::from_parts(parts, Full::new(bytes).boxed()))
+}
+
+async fn intercept_orphan_initialized(req: AxumRequest, next: Next) -> Response<Body> {
+    let has_session_id = req.headers().contains_key("mcp-session-id");
+    if !has_session_id && req.method() == Method::POST {
+        let (parts, body) = req.into_parts();
+        let bytes = match axum::body::to_bytes(body, 4096).await {
+            Ok(b) => b,
+            Err(_) => {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Body::empty())
+                    .unwrap();
+            }
+        };
+        let is_initialized = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(|s| s.to_owned()))
+            .map(|m| m == "notifications/initialized")
+            .unwrap_or(false);
+        if is_initialized {
+            return Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .body(Body::empty())
+                .unwrap();
+        }
+        let req = AxumRequest::from_parts(parts, Body::from(bytes));
+        return next.run(req).await;
+    }
+    next.run(req).await
 }
 
 fn forbidden_response() -> BoxResponse {
@@ -281,6 +438,10 @@ fn add_cors_headers(headers: &mut HeaderMap, origin: Option<&str>, allow_any: bo
         ),
     );
     headers.insert("Access-Control-Max-Age", HeaderValue::from_static("86400"));
+    headers.insert(
+        "Access-Control-Expose-Headers",
+        HeaderValue::from_static("mcp-session-id"),
+    );
 }
 
 fn normalize_protocol_version<B>(req: &mut Request<B>) {
@@ -723,4 +884,473 @@ where
 
     serde_json::from_value::<T>(value)
         .map_err(|err| McpError::internal_error(err.to_string(), None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, RwLock};
+    use tokio::sync::Mutex;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    /// Spin up a real MCP server on a random port and return (base_url, state).
+    async fn start_test_server(registry: Registry) -> (String, McpServerState) {
+        start_test_server_with_allow_list(registry, AllowList::Any).await
+    }
+
+    async fn start_test_server_with_allow_list(
+        registry: Registry,
+        allow_list: AllowList,
+    ) -> (String, McpServerState) {
+        // Bind with port 0 to get a free port, keep the listener open to avoid races.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = std_listener.local_addr().unwrap().port();
+
+        let allow_list = Arc::new(RwLock::new(allow_list));
+        let response_map = Arc::new(Mutex::new(HashMap::new()));
+        let request_counter = Arc::new(AtomicU64::new(0));
+        let registry = Arc::new(RwLock::new(registry));
+        let client_sinks = Arc::new(Mutex::new(Vec::new()));
+
+        let (state_tx, state_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap(),
+            );
+            let runtime_keep = runtime.clone(); // keep alive while thread is parked
+            let state = start_mcp_server_with_listener(
+                runtime,
+                std_listener,
+                None,
+                allow_list,
+                response_map,
+                request_counter,
+                registry,
+                Duration::from_millis(200),
+                client_sinks,
+            )
+            .unwrap();
+            let _ = state_tx.send(state);
+            // Park thread to keep runtime_keep (and thus the server) alive.
+            let _keep = runtime_keep;
+            std::thread::park();
+        });
+        let state = state_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("server state");
+
+        let base = format!("http://127.0.0.1:{port}");
+
+        // Wait until the server is actually serving HTTP.
+        let client = reqwest::Client::new();
+        for _ in 0..50 {
+            if client.get(format!("{base}/")).send().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        (base, state)
+    }
+
+    fn make_registry_with_tool() -> Registry {
+        use rmcp::model::Tool;
+        let mut registry = Registry::default();
+        let tool: Tool = serde_json::from_value(serde_json::json!({
+            "name": "greet",
+            "description": "Say hello",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                },
+                "required": ["name"]
+            }
+        }))
+        .unwrap();
+        let schema_value = serde_json::Value::Object(tool.input_schema.as_ref().clone());
+        let schema = jsonschema::validator_for(&schema_value).unwrap();
+        registry.register_tool(tool, schema);
+        registry
+    }
+
+    fn make_registry_with_resource() -> Registry {
+        use rmcp::model::Resource;
+        let mut registry = Registry::default();
+        let resource: Resource = serde_json::from_value(serde_json::json!({
+            "uri": "str://hello",
+            "name": "hello"
+        }))
+        .unwrap();
+        registry.register_resource(resource);
+        registry
+    }
+
+    fn make_registry_with_prompt() -> Registry {
+        use rmcp::model::Prompt;
+        let mut registry = Registry::default();
+        let prompt: Prompt = serde_json::from_value(serde_json::json!({
+            "name": "summarize",
+            "description": "Summarize text"
+        }))
+        .unwrap();
+        registry.register_prompt(prompt);
+        registry
+    }
+
+    // ── parse_allow_list ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_allow_list_empty_returns_default_local() {
+        let al = parse_allow_list("").unwrap();
+        assert!(matches!(al, AllowList::List(_)));
+        assert!(al.allows("http://localhost"));
+        assert!(al.allows("http://127.0.0.1"));
+        assert!(!al.allows("http://evil.com"));
+    }
+
+    #[test]
+    fn parse_allow_list_star_returns_any() {
+        let al = parse_allow_list("*").unwrap();
+        assert!(matches!(al, AllowList::Any));
+        assert!(al.allows("http://anything.com"));
+    }
+
+    #[test]
+    fn parse_allow_list_json_array() {
+        let al = parse_allow_list(r#"["http://example.com","http://other.com"]"#).unwrap();
+        assert!(al.allows("http://example.com"));
+        assert!(al.allows("http://other.com"));
+        assert!(!al.allows("http://evil.com"));
+    }
+
+    #[test]
+    fn parse_allow_list_json_array_with_star_returns_any() {
+        let al = parse_allow_list(r#"["http://example.com","*"]"#).unwrap();
+        assert!(matches!(al, AllowList::Any));
+    }
+
+    // ── parse_mcp_response ───────────────────────────────────────────────────
+
+    #[test]
+    fn parse_mcp_response_extracts_result_field() {
+        let resp = McpResponse {
+            status: 200,
+            headers: HashMap::new(),
+            body: r#"{"result":{"tools":[]}}"#.to_owned(),
+        };
+        let val: serde_json::Value = parse_mcp_response(resp).unwrap();
+        assert_eq!(val, serde_json::json!({"tools": []}));
+    }
+
+    #[test]
+    fn parse_mcp_response_returns_error_on_error_field() {
+        let resp = McpResponse {
+            status: 200,
+            headers: HashMap::new(),
+            body: r#"{"error":{"code":-32600,"message":"bad request"}}"#.to_owned(),
+        };
+        let result: Result<serde_json::Value, _> = parse_mcp_response(resp);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("bad request"));
+    }
+
+    #[test]
+    fn parse_mcp_response_error_on_empty_body() {
+        let resp = McpResponse {
+            status: 200,
+            headers: HashMap::new(),
+            body: "   ".to_owned(),
+        };
+        let result: Result<serde_json::Value, _> = parse_mcp_response(resp);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_mcp_response_http_error_status() {
+        let resp = McpResponse {
+            status: 500,
+            headers: HashMap::new(),
+            body: r#"{"something":"value"}"#.to_owned(),
+        };
+        let result: Result<serde_json::Value, _> = parse_mcp_response(resp);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("500"));
+    }
+
+    // ── normalize_protocol_version ───────────────────────────────────────────
+
+    #[test]
+    fn normalize_replaces_future_version() {
+        let mut req = Request::builder()
+            .header("mcp-protocol-version", "2025-11-25")
+            .body(())
+            .unwrap();
+        normalize_protocol_version(&mut req);
+        assert_eq!(
+            req.headers().get("mcp-protocol-version").unwrap(),
+            "2025-06-18"
+        );
+    }
+
+    #[test]
+    fn normalize_removes_unknown_version() {
+        let mut req = Request::builder()
+            .header("mcp-protocol-version", "1999-01-01")
+            .body(())
+            .unwrap();
+        normalize_protocol_version(&mut req);
+        assert!(req.headers().get("mcp-protocol-version").is_none());
+    }
+
+    #[test]
+    fn normalize_keeps_known_version() {
+        for version in ["2024-11-05", "2025-03-26", "2025-06-18"] {
+            let mut req = Request::builder()
+                .header("mcp-protocol-version", version)
+                .body(())
+                .unwrap();
+            normalize_protocol_version(&mut req);
+            assert_eq!(
+                req.headers().get("mcp-protocol-version").unwrap(),
+                version,
+                "version {version} should be kept"
+            );
+        }
+    }
+
+    // ── HTTP integration tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_root_returns_ok() {
+        let (base, _state) = start_test_server(Registry::default()).await;
+        let resp = reqwest::get(format!("{base}/")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "MCP server");
+    }
+
+    #[tokio::test]
+    async fn cors_forbidden_for_disallowed_origin() {
+        let (base, _state) =
+            start_test_server_with_allow_list(Registry::default(), AllowList::default_local())
+                .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{base}/mcp"))
+            .header("origin", "http://evil.com")
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403);
+    }
+
+    #[tokio::test]
+    async fn cors_options_preflight_returns_204() {
+        let (base, _state) = start_test_server(Registry::default()).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .request(reqwest::Method::OPTIONS, format!("{base}/mcp"))
+            .header("origin", "http://example.com")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+        assert!(resp.headers().contains_key("access-control-allow-origin"));
+    }
+
+    #[tokio::test]
+    async fn orphan_initialized_notification_returns_202() {
+        let (base, _state) = start_test_server(Registry::default()).await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/mcp");
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        });
+        // No mcp-session-id header → intercepted
+        let resp = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202);
+    }
+
+    // ── rmcp client integration tests ───────────────────────────────────────
+
+    mod rmcp_client {
+        use super::*;
+        use rmcp::service::ServiceExt;
+        use rmcp::transport::StreamableHttpClientTransport;
+
+        async fn connect(base: &str) -> rmcp::service::RunningService<rmcp::service::RoleClient, ()> {
+            let url = format!("{base}/mcp");
+            let transport = StreamableHttpClientTransport::from_uri(url);
+            ().serve(transport).await.expect("rmcp client should connect")
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_initialize_and_get_server_info() {
+            let (base, _state) = start_test_server(Registry::default()).await;
+            let client = connect(&base).await;
+            let info = client.peer().peer_info();
+            assert!(info.is_some(), "server info should be available after init");
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_list_tools_empty() {
+            let (base, _state) = start_test_server(Registry::default()).await;
+            let client = connect(&base).await;
+            let result = client.list_tools(None).await.unwrap();
+            assert!(result.tools.is_empty());
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_list_tools_with_registered_tool() {
+            let registry = make_registry_with_tool();
+            let (base, _state) = start_test_server(registry).await;
+            let client = connect(&base).await;
+            let result = client.list_tools(None).await.unwrap();
+            assert_eq!(result.tools.len(), 1);
+            assert_eq!(result.tools[0].name.as_ref(), "greet");
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_call_tool_unknown() {
+            let (base, _state) = start_test_server(Registry::default()).await;
+            let client = connect(&base).await;
+            let params = serde_json::from_value(serde_json::json!({
+                "name": "nonexistent"
+            })).unwrap();
+            let err = client.call_tool(params).await;
+            assert!(err.is_err(), "calling unknown tool should fail");
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_call_tool_invalid_args() {
+            let registry = make_registry_with_tool();
+            let (base, _state) = start_test_server(registry).await;
+            let client = connect(&base).await;
+            let params = serde_json::from_value(serde_json::json!({
+                "name": "greet",
+                "arguments": {}
+            })).unwrap();
+            let err = client.call_tool(params).await;
+            assert!(err.is_err(), "calling tool with invalid args should fail");
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_call_tool_no_connection() {
+            let registry = make_registry_with_tool();
+            let (base, _state) = start_test_server(registry).await;
+            let client = connect(&base).await;
+            let params = serde_json::from_value(serde_json::json!({
+                "name": "greet",
+                "arguments": { "name": "world" }
+            })).unwrap();
+            let err = client.call_tool(params).await;
+            assert!(err.is_err(), "calling tool without 1C connection should fail");
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_list_resources() {
+            let registry = make_registry_with_resource();
+            let (base, _state) = start_test_server(registry).await;
+            let client = connect(&base).await;
+            let result = client.list_resources(None).await.unwrap();
+            assert_eq!(result.resources.len(), 1);
+            assert_eq!(result.resources[0].uri.as_str(), "str://hello");
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_read_resource_not_found() {
+            let (base, _state) = start_test_server(Registry::default()).await;
+            let client = connect(&base).await;
+            let params = serde_json::from_value(serde_json::json!({
+                "uri": "str://missing"
+            })).unwrap();
+            let err = client.read_resource(params).await;
+            assert!(err.is_err(), "reading missing resource should fail");
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_list_resource_templates() {
+            use rmcp::model::ResourceTemplate;
+            let mut registry = Registry::default();
+            let tmpl: ResourceTemplate = serde_json::from_value(serde_json::json!({
+                "uriTemplate": "str://users/{id}",
+                "name": "user"
+            }))
+            .unwrap();
+            registry.register_resource_template(tmpl).unwrap();
+
+            let (base, _state) = start_test_server(registry).await;
+            let client = connect(&base).await;
+            let result = client.list_resource_templates(None).await.unwrap();
+            assert_eq!(result.resource_templates.len(), 1);
+            assert_eq!(result.resource_templates[0].uri_template.as_str(), "str://users/{id}");
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_list_prompts() {
+            let registry = make_registry_with_prompt();
+            let (base, _state) = start_test_server(registry).await;
+            let client = connect(&base).await;
+            let result = client.list_prompts(None).await.unwrap();
+            assert_eq!(result.prompts.len(), 1);
+            assert_eq!(result.prompts[0].name.as_str(), "summarize");
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_get_prompt_not_found() {
+            let (base, _state) = start_test_server(Registry::default()).await;
+            let client = connect(&base).await;
+            let params = serde_json::from_value(serde_json::json!({
+                "name": "nonexistent"
+            })).unwrap();
+            let err = client.get_prompt(params).await;
+            assert!(err.is_err(), "getting missing prompt should fail");
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_multiple_sessions_independent() {
+            let registry = make_registry_with_tool();
+            let (base, _state) = start_test_server(registry).await;
+
+            let client1 = connect(&base).await;
+            let client2 = connect(&base).await;
+
+            let r1 = client1.list_tools(None).await.unwrap();
+            let r2 = client2.list_tools(None).await.unwrap();
+            assert_eq!(r1.tools.len(), 1);
+            assert_eq!(r2.tools.len(), 1);
+
+            client1.cancel().await.unwrap();
+            // client2 should still work after client1 disconnects
+            let r3 = client2.list_tools(None).await.unwrap();
+            assert_eq!(r3.tools.len(), 1);
+            client2.cancel().await.unwrap();
+        }
+    }
 }

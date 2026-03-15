@@ -361,6 +361,15 @@
 		"text/plain"
 	);
 	MCP_Компонента.ЗарегистрироватьРесурс(MCP_ЗаписатьJSON(Ресурс));
+
+	РесурсВремя = Новый Структура(
+		"uri,name,description,mimeType",
+		"str://current-time",
+		"current-time",
+		"Returns the current server date and time",
+		"text/plain"
+	);
+	MCP_Компонента.ЗарегистрироватьРесурс(MCP_ЗаписатьJSON(РесурсВремя));
 КонецПроцедуры
 
 &НаКлиенте
@@ -474,6 +483,16 @@
 			URI,
 			"text/plain",
 			"Demo resource content"
+		));
+		Результат = Новый Структура("contents", Содержимое);
+		Ответ = Новый Структура("result", Результат);
+	ИначеЕсли URI = "str://current-time" Тогда
+		Содержимое = Новый Массив;
+		Содержимое.Добавить(Новый Структура(
+			"uri,mimeType,text",
+			URI,
+			"text/plain",
+			Строка(ТекущаяДата())
 		));
 		Результат = Новый Структура("contents", Содержимое);
 		Ответ = Новый Структура("result", Результат);
@@ -615,7 +634,7 @@
 		MCP_Лог("Notification skipped: MCP_Компонента is undefined");
 		Возврат;
 	КонецЕсли;
-	URI = "str://demo";
+	URI = "str://current-time";
 	Попытка
 		MCP_Компонента.УведомитьОбОбновленииРесурса(URI);
 		MCP_Лог(СтрШаблон("Sent notifications/resources/updated uri=%1", URI));
