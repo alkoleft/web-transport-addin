@@ -72,6 +72,10 @@
 			MCP_ОбработатьPromptGet(ЗапросJSON);
 		ИначеЕсли Событие = "MCP_NOTIFICATION" Тогда
 			MCP_ОбработатьNotification(ЗапросJSON);
+		ИначеЕсли Событие = "MCP_RESOURCE_SUBSCRIBE" Тогда
+			MCP_ОбработатьResourceSubscribe(ЗапросJSON);
+		ИначеЕсли Событие = "MCP_RESOURCE_UNSUBSCRIBE" Тогда
+			MCP_ОбработатьResourceUnsubscribe(ЗапросJSON);
 		КонецЕсли;
 	КонецЕсли;
 КонецПроцедуры
@@ -739,4 +743,23 @@
 	Возврат "";
 КонецФункции
 
+&НаКлиенте
+Процедура MCP_ОбработатьResourceSubscribe(ЗапросJSON)
+	Если Не ЗначениеЗаполнено(ЗапросJSON) Тогда
+		Возврат;
+	КонецЕсли;
+	Запрос = ПрочитатьJSONСтрокуБезОшибок(ЗапросJSON, Неопределено);
+	URI = MCP_ПолучитьСвойство(Запрос, "uri", "");
+	MCP_Лог(СтрШаблон("Client subscribed to resource uri=%1", URI));
+КонецПроцедуры
+
+&НаКлиенте
+Процедура MCP_ОбработатьResourceUnsubscribe(ЗапросJSON)
+	Если Не ЗначениеЗаполнено(ЗапросJSON) Тогда
+		Возврат;
+	КонецЕсли;
+	Запрос = ПрочитатьJSONСтрокуБезОшибок(ЗапросJSON, Неопределено);
+	URI = MCP_ПолучитьСвойство(Запрос, "uri", "");
+	MCP_Лог(СтрШаблон("Client unsubscribed from resource uri=%1", URI));
+КонецПроцедуры
 
