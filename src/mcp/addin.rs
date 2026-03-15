@@ -10,7 +10,9 @@ use tokio::runtime::Runtime;
 use tokio::sync::{oneshot, Mutex};
 
 use super::registry::Registry;
-use super::server::{parse_allow_list, start_mcp_server, AllowList, McpResponse, McpServerState};
+use super::server::{
+    parse_allow_list, start_mcp_server, AllowList, McpResponse, McpServerInfo, McpServerState,
+};
 use crate::VERSION;
 pub struct McpAddIn {
     pub(super) connection: Option<&'static addin1c::Connection>,
@@ -21,6 +23,7 @@ pub struct McpAddIn {
     pub(super) allow_list: Arc<RwLock<AllowList>>,
     pub(super) registry: Arc<RwLock<Registry>>,
     pub(super) client_sinks: Arc<Mutex<Vec<ClientSink>>>,
+    pub(super) server_info: Arc<RwLock<McpServerInfo>>,
     last_error: Option<Box<dyn Error>>,
 }
 
@@ -82,6 +85,7 @@ impl McpAddIn {
             self.registry.clone(),
             std::time::Duration::from_secs(timeout_secs as u64),
             self.client_sinks.clone(),
+            self.server_info.clone(),
         )?;
 
         self.server = Some(server);
@@ -389,6 +393,46 @@ impl McpAddIn {
         return_value.set_bool(true);
         Ok(())
     }
+
+    fn set_server_info(&mut self, json: &mut Variant, return_value: &mut Variant) -> AddinResult {
+        let json = json.get_string()?;
+        let value: serde_json::Value =
+            serde_json::from_str(json.as_str()).map_err(|e| format!("Некорректный JSON: {e}"))?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| "Ожидается JSON объект".to_owned())?;
+
+        let name = obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Отсутствует поле name".to_owned())?;
+        let version = obj
+            .get("version")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Отсутствует поле version".to_owned())?;
+
+        let info = McpServerInfo {
+            name: Some(name.to_owned()),
+            version: Some(version.to_owned()),
+            title: obj.get("title").and_then(|v| v.as_str()).map(str::to_owned),
+            description: obj
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            instructions: obj
+                .get("instructions")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+        };
+
+        let mut guard = self
+            .server_info
+            .write()
+            .map_err(|_| "Lock poisoned".to_owned())?;
+        *guard = info;
+        return_value.set_bool(true);
+        Ok(())
+    }
 }
 
 impl SimpleAddin for McpAddIn {
@@ -489,6 +533,10 @@ impl SimpleAddin for McpAddIn {
                 name: name!("Версия"),
                 method: Methods::Method0(Self::version),
             },
+            MethodInfo {
+                name: name!("УстановитьИнформациюОСервере"),
+                method: Methods::Method1(Self::set_server_info),
+            },
         ]
     }
 
@@ -512,6 +560,7 @@ impl Default for McpAddIn {
             allow_list: Arc::new(RwLock::new(AllowList::default_local())),
             registry: Arc::new(RwLock::new(Registry::default())),
             client_sinks: Arc::new(Mutex::new(Vec::new())),
+            server_info: Arc::new(RwLock::new(McpServerInfo::default())),
             runtime: Arc::new(Runtime::new().unwrap()),
         }
     }

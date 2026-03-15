@@ -22,9 +22,10 @@ use http_body_util::{BodyExt, Full};
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, CustomNotification, CustomRequest, CustomResult,
-    ErrorCode, GetPromptRequestParams, GetPromptResult, InitializeRequestParams, InitializeResult,
-    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
-    PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, ServerCapabilities,
+    ErrorCode, GetPromptRequestParams, GetPromptResult, Implementation, InitializeRequestParams,
+    InitializeResult, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
+    ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
+    ServerCapabilities,
 };
 use rmcp::service::{ClientSink, NotificationContext, RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -37,6 +38,16 @@ use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
 
 use super::registry::{Registry, ResolveResourceError, ResolvedResource};
+
+/// Server identity and instructions, settable from 1C before starting the server.
+#[derive(Clone, Debug, Default)]
+pub(super) struct McpServerInfo {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub instructions: Option<String>,
+}
 
 pub(super) struct McpServerState {
     pub(super) shutdown: oneshot::Sender<()>,
@@ -115,6 +126,7 @@ pub(super) fn start_mcp_server(
     registry: Arc<RwLock<Registry>>,
     response_timeout: Duration,
     client_sinks: Arc<Mutex<Vec<ClientSink>>>,
+    server_info: Arc<RwLock<McpServerInfo>>,
 ) -> Result<McpServerState, Box<dyn Error>> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -125,6 +137,7 @@ pub(super) fn start_mcp_server(
         registry,
         response_timeout,
         client_sinks,
+        server_info,
     });
 
     let service = StreamableHttpService::new(
@@ -176,6 +189,7 @@ fn start_mcp_server_with_listener(
     registry: Arc<RwLock<Registry>>,
     response_timeout: Duration,
     client_sinks: Arc<Mutex<Vec<ClientSink>>>,
+    server_info: Arc<RwLock<McpServerInfo>>,
 ) -> Result<McpServerState, Box<dyn Error>> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -186,6 +200,7 @@ fn start_mcp_server_with_listener(
         registry,
         response_timeout,
         client_sinks,
+        server_info,
     });
 
     let service = StreamableHttpService::new(
@@ -470,6 +485,7 @@ struct McpBridgeHandler {
     registry: Arc<RwLock<Registry>>,
     response_timeout: Duration,
     client_sinks: Arc<Mutex<Vec<ClientSink>>>,
+    server_info: Arc<RwLock<McpServerInfo>>,
 }
 
 impl McpBridgeHandler {
@@ -570,7 +586,23 @@ impl ServerHandler for McpBridgeHandler {
                 .enable_resources()
                 .enable_prompts()
                 .build();
-            Ok(InitializeResult::new(capabilities))
+            let mut result = InitializeResult::new(capabilities);
+            if let Ok(info) = self.server_info.read() {
+                if let (Some(name), Some(version)) = (info.name.as_ref(), info.version.as_ref()) {
+                    let mut impl_info = Implementation::new(name.clone(), version.clone());
+                    if let Some(title) = info.title.as_ref() {
+                        impl_info = impl_info.with_title(title.clone());
+                    }
+                    if let Some(description) = info.description.as_ref() {
+                        impl_info = impl_info.with_description(description.clone());
+                    }
+                    result = result.with_server_info(impl_info);
+                }
+                if let Some(instructions) = info.instructions.as_ref() {
+                    result = result.with_instructions(instructions.clone());
+                }
+            }
+            Ok(result)
         }
     }
 
@@ -912,6 +944,7 @@ mod tests {
         let request_counter = Arc::new(AtomicU64::new(0));
         let registry = Arc::new(RwLock::new(registry));
         let client_sinks = Arc::new(Mutex::new(Vec::new()));
+        let server_info = Arc::new(RwLock::new(McpServerInfo::default()));
 
         let (state_tx, state_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -932,6 +965,7 @@ mod tests {
                 registry,
                 Duration::from_millis(200),
                 client_sinks,
+                server_info,
             )
             .unwrap();
             let _ = state_tx.send(state);
