@@ -14,7 +14,7 @@ use super::registry::Registry;
 use super::server::{
     parse_allow_list, start_mcp_server, AllowList, McpResponse, McpServerInfo, McpServerState,
 };
-use crate::VERSION;
+use crate::{parse_headers, VERSION};
 pub struct McpAddIn {
     pub(super) connection: Option<&'static addin1c::Connection>,
     pub(super) runtime: Arc<Runtime>,
@@ -25,6 +25,7 @@ pub struct McpAddIn {
     pub(super) registry: Arc<RwLock<Registry>>,
     pub(super) client_sinks: Arc<Mutex<Vec<ClientSink>>>,
     pub(super) server_info: Arc<RwLock<McpServerInfo>>,
+    pub(super) subscriptions: Arc<Mutex<HashMap<String, Vec<ClientSink>>>>,
     last_error: Option<Box<dyn Error>>,
 }
 
@@ -87,6 +88,7 @@ impl McpAddIn {
             std::time::Duration::from_secs(timeout_secs as u64),
             self.client_sinks.clone(),
             self.server_info.clone(),
+            self.subscriptions.clone(),
         )?;
 
         self.server = Some(server);
@@ -379,15 +381,7 @@ impl McpAddIn {
             return Err("MCP сервер не запущен".to_owned().into());
         };
         let uri = uri.get_string()?;
-        self.runtime.block_on(
-            server.broadcast_notification(
-                rmcp::model::ServerNotification::ResourceUpdatedNotification(
-                    rmcp::model::ResourceUpdatedNotification::new(
-                        rmcp::model::ResourceUpdatedNotificationParam::new(uri),
-                    ),
-                ),
-            ),
-        );
+        self.runtime.block_on(server.notify_resource_updated(uri));
         return_value.set_bool(true);
         Ok(())
     }
@@ -569,30 +563,10 @@ impl Default for McpAddIn {
             registry: Arc::new(RwLock::new(Registry::default())),
             client_sinks: Arc::new(Mutex::new(Vec::new())),
             server_info: Arc::new(RwLock::new(McpServerInfo::default())),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
             runtime: Arc::new(Runtime::new().unwrap()),
         }
     }
-}
-
-fn parse_headers(json_headers: String) -> Result<HashMap<String, String>, Box<dyn Error>> {
-    if json_headers.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let raw = serde_json::from_str::<HashMap<String, serde_json::Value>>(&json_headers)?;
-    Ok(raw
-        .into_iter()
-        .map(|(key, value)| {
-            let value = match value {
-                serde_json::Value::Null => "".to_owned(),
-                serde_json::Value::Bool(bool) => bool.to_string(),
-                serde_json::Value::Number(number) => number.to_string(),
-                serde_json::Value::String(str) => str,
-                serde_json::Value::Array(_) => "".to_owned(),
-                serde_json::Value::Object(_) => "".to_owned(),
-            };
-            (key, value)
-        })
-        .collect())
 }
 
 fn parse_json_items(raw: &str) -> Result<Vec<Value>, Box<dyn Error>> {

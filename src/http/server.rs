@@ -1,4 +1,5 @@
 use super::{mcp_handler, HttpAddIn};
+use crate::parse_headers;
 use addin1c::{name, AddinResult, CString1C, Variant};
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
@@ -156,11 +157,6 @@ impl HttpAddIn {
             headers,
             body,
         };
-        eprintln!(
-            "[mcp] http response id={} status={}",
-            request_id, response.status
-        );
-
         let Some(server) = self.http_server.as_ref() else {
             return Err("HTTP сервер не запущен".to_owned().into());
         };
@@ -186,7 +182,6 @@ impl HttpAddIn {
     ) -> AddinResult {
         let session_id = session_id.get_string()?;
         let data = data.get_string()?;
-        eprintln!("[mcp] sse send session_id={} data={}", session_id, data);
         let sse_sessions = self.sse_sessions.clone();
         self.runtime.clone().block_on(async {
             let map = sse_sessions.lock().await;
@@ -244,7 +239,7 @@ async fn handle_http_request(
     }
 
     let (parts, body) = req.into_parts();
-    let body_bytes = match to_bytes(body, usize::MAX).await {
+    let body_bytes = match to_bytes(body, 16 * 1024 * 1024).await {
         Ok(bytes) => bytes,
         Err(_) => {
             let mut response = Response::builder()
@@ -469,25 +464,4 @@ fn get_query_param(query: &str, key: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn parse_headers(json_headers: String) -> Result<HashMap<String, String>, Box<dyn Error>> {
-    if json_headers.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let raw = serde_json::from_str::<HashMap<String, serde_json::Value>>(&json_headers)?;
-    Ok(raw
-        .into_iter()
-        .map(|(key, value)| {
-            let value = match value {
-                serde_json::Value::Null => "".to_owned(),
-                serde_json::Value::Bool(bool) => bool.to_string(),
-                serde_json::Value::Number(number) => number.to_string(),
-                serde_json::Value::String(str) => str,
-                serde_json::Value::Array(_) => "".to_owned(),
-                serde_json::Value::Object(_) => "".to_owned(),
-            };
-            (key, value)
-        })
-        .collect())
 }

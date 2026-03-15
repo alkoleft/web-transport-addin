@@ -25,7 +25,8 @@ use rmcp::model::{
     ErrorCode, GetPromptRequestParams, GetPromptResult, Implementation, InitializeRequestParams,
     InitializeResult, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
     ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
-    ServerCapabilities,
+    ResourceUpdatedNotificationParam, ServerCapabilities, SubscribeRequestParams,
+    UnsubscribeRequestParams,
 };
 use rmcp::service::{ClientSink, NotificationContext, RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -61,6 +62,10 @@ impl McpServerState {
         notification: rmcp::model::ServerNotification,
     ) {
         self.handler.broadcast_notification(notification).await;
+    }
+
+    pub(super) async fn notify_resource_updated(&self, uri: String) {
+        self.handler.notify_resource_updated(uri).await;
     }
 }
 
@@ -127,6 +132,7 @@ pub(super) fn start_mcp_server(
     response_timeout: Duration,
     client_sinks: Arc<Mutex<Vec<ClientSink>>>,
     server_info: Arc<RwLock<McpServerInfo>>,
+    subscriptions: Arc<Mutex<HashMap<String, Vec<ClientSink>>>>,
 ) -> Result<McpServerState, Box<dyn Error>> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -138,6 +144,7 @@ pub(super) fn start_mcp_server(
         response_timeout,
         client_sinks,
         server_info,
+        subscriptions,
     });
 
     let service = StreamableHttpService::new(
@@ -190,6 +197,7 @@ fn start_mcp_server_with_listener(
     response_timeout: Duration,
     client_sinks: Arc<Mutex<Vec<ClientSink>>>,
     server_info: Arc<RwLock<McpServerInfo>>,
+    subscriptions: Arc<Mutex<HashMap<String, Vec<ClientSink>>>>,
 ) -> Result<McpServerState, Box<dyn Error>> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -201,6 +209,7 @@ fn start_mcp_server_with_listener(
         response_timeout,
         client_sinks,
         server_info,
+        subscriptions,
     });
 
     let service = StreamableHttpService::new(
@@ -486,6 +495,7 @@ struct McpBridgeHandler {
     response_timeout: Duration,
     client_sinks: Arc<Mutex<Vec<ClientSink>>>,
     server_info: Arc<RwLock<McpServerInfo>>,
+    subscriptions: Arc<Mutex<HashMap<String, Vec<ClientSink>>>>,
 }
 
 impl McpBridgeHandler {
@@ -558,17 +568,50 @@ impl McpBridgeHandler {
     }
 }
 
+async fn send_to_sinks(sinks: &[ClientSink], notification: rmcp::model::ServerNotification) {
+    for sink in sinks {
+        let _ = sink.send_notification(notification.clone()).await;
+    }
+}
+
 impl McpBridgeHandler {
     pub(super) async fn broadcast_notification(
         &self,
         notification: rmcp::model::ServerNotification,
     ) {
-        let mut sinks = self.client_sinks.lock().await;
-        sinks.retain(|s| !s.is_transport_closed());
-        for sink in sinks.iter() {
-            let _ = sink.send_notification(notification.clone()).await;
-        }
+        let sinks = {
+            let mut sinks = self.client_sinks.lock().await;
+            sinks.retain(|s| !s.is_transport_closed());
+            sinks.clone()
+        };
+        send_to_sinks(&sinks, notification).await;
     }
+
+    pub(super) async fn notify_resource_updated(&self, uri: String) {
+        let sinks = {
+            let mut subs = self.subscriptions.lock().await;
+            let Some(entry) = subs.get_mut(&uri) else {
+                return;
+            };
+            entry.retain(|s| !s.is_transport_closed());
+            if entry.is_empty() {
+                subs.remove(&uri);
+                return;
+            }
+            entry.clone()
+        };
+        let notification = rmcp::model::ServerNotification::ResourceUpdatedNotification(
+            rmcp::model::ResourceUpdatedNotification::new(ResourceUpdatedNotificationParam::new(
+                uri,
+            )),
+        );
+        send_to_sinks(&sinks, notification).await;
+    }
+}
+
+fn peer_id(peer: &ClientSink) -> Option<usize> {
+    peer.peer_info()
+        .map(|info| info as *const _ as usize)
 }
 
 impl ServerHandler for McpBridgeHandler {
@@ -802,6 +845,55 @@ impl ServerHandler for McpBridgeHandler {
         }
     }
 
+    fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<(), McpError>> + Send + '_ {
+        async move {
+            let uri = request.uri.clone();
+            {
+                let mut subs = self.subscriptions.lock().await;
+                let entry = subs.entry(uri.clone()).or_default();
+                entry.retain(|s| !s.is_transport_closed());
+                entry.push(context.peer.clone());
+            }
+            let _ = self.emit_event(
+                "MCP_RESOURCE_SUBSCRIBE",
+                serde_json::json!({ "uri": uri }),
+            );
+            Ok(())
+        }
+    }
+
+    fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<(), McpError>> + Send + '_ {
+        async move {
+            let uri = request.uri.clone();
+            let requester_id = peer_id(&context.peer);
+            {
+                let mut subs = self.subscriptions.lock().await;
+                if let Some(entry) = subs.get_mut(&uri) {
+                    entry.retain(|s| {
+                        !s.is_transport_closed()
+                            && requester_id.map_or(true, |id| peer_id(s) != Some(id))
+                    });
+                    if entry.is_empty() {
+                        subs.remove(&uri);
+                    }
+                }
+            }
+            let _ = self.emit_event(
+                "MCP_RESOURCE_UNSUBSCRIBE",
+                serde_json::json!({ "uri": uri }),
+            );
+            Ok(())
+        }
+    }
+
     fn on_custom_request(
         &self,
         request: CustomRequest,
@@ -973,6 +1065,7 @@ mod tests {
                 Duration::from_millis(200),
                 client_sinks,
                 server_info,
+                Arc::new(Mutex::new(HashMap::new())),
             )
             .unwrap();
             let _ = state_tx.send(state);

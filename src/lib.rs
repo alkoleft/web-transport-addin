@@ -4,6 +4,8 @@ mod mcp;
 mod ws;
 mod ws_client;
 use std::{
+    collections::HashMap,
+    error::Error,
     ffi::{c_int, c_long, c_void},
     sync::atomic::{AtomicI32, Ordering},
 };
@@ -11,6 +13,26 @@ use std::{
 use addin1c::{create_component, destroy_component, name, AttachType};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub(crate) fn parse_headers(json_headers: String) -> Result<HashMap<String, String>, Box<dyn Error>> {
+    if json_headers.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let raw = serde_json::from_str::<HashMap<String, serde_json::Value>>(&json_headers)?;
+    Ok(raw
+        .into_iter()
+        .map(|(key, value)| {
+            let value = match value {
+                serde_json::Value::Null => "".to_owned(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::String(s) => s,
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => "".to_owned(),
+            };
+            (key, value)
+        })
+        .collect())
+}
 
 pub static PLATFORM_CAPABILITIES: AtomicI32 = AtomicI32::new(-1);
 
