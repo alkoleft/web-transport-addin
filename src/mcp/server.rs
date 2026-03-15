@@ -583,8 +583,12 @@ impl ServerHandler for McpBridgeHandler {
         async move {
             let capabilities = ServerCapabilities::builder()
                 .enable_tools()
+                .enable_tool_list_changed()
                 .enable_resources()
+                .enable_resources_list_changed()
+                .enable_resources_subscribe()
                 .enable_prompts()
+                .enable_prompts_list_changed()
                 .build();
             let mut result = InitializeResult::new(capabilities);
             if let Ok(info) = self.server_info.read() {
