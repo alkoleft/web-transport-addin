@@ -21,12 +21,15 @@ use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, CustomNotification, CustomRequest, CustomResult,
-    ErrorCode, GetPromptRequestParams, GetPromptResult, Implementation, InitializeRequestParams,
-    InitializeResult, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
-    ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
-    ResourceUpdatedNotificationParam, ServerCapabilities, SubscribeRequestParams,
-    UnsubscribeRequestParams,
+    CallToolRequestParams, CallToolResult, CancelTaskParams, CancelTaskResult,
+    CustomNotification, CustomRequest, CustomResult, ErrorCode, GetPromptRequestParams,
+    GetPromptResult, GetTaskInfoParams, GetTaskPayloadResult, GetTaskResult, GetTaskResultParams,
+    Implementation, InitializeRequestParams, InitializeResult, ListPromptsResult,
+    ListResourceTemplatesResult, ListResourcesResult, ListTasksResult, ListToolsResult,
+    PaginatedRequestParams, ProgressNotification, ProgressNotificationParam, ProgressToken,
+    ReadResourceRequestParams, ReadResourceResult, ResourceUpdatedNotificationParam,
+    ServerCapabilities, SubscribeRequestParams, Task, TaskRequestsCapability, TaskStatus,
+    TasksCapability, ToolsTaskCapability, UnsubscribeRequestParams,
 };
 use rmcp::service::{ClientSink, NotificationContext, RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -66,6 +69,35 @@ impl McpServerState {
 
     pub(super) async fn notify_resource_updated(&self, uri: String) {
         self.handler.notify_resource_updated(uri).await;
+    }
+
+    pub(super) async fn complete_task(
+        &self,
+        task_id: &str,
+        response: McpResponse,
+    ) -> Result<(), String> {
+        self.handler.complete_task(task_id, response).await
+    }
+
+    pub(super) async fn update_task_status(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        self.handler.update_task_status(task_id, status, message).await
+    }
+
+    pub(super) async fn notify_task_progress(
+        &self,
+        task_id: &str,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        self.handler
+            .notify_task_progress(task_id, progress, total, message)
+            .await
     }
 }
 
@@ -121,6 +153,23 @@ pub(super) struct McpResponse {
     pub(super) body: String,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct TaskEntry {
+    task: Task,
+    result: Option<Result<serde_json::Value, McpError>>,
+    progress_token: Option<ProgressToken>,
+}
+
+impl TaskEntry {
+    fn new(task: Task, progress_token: Option<ProgressToken>) -> Self {
+        Self {
+            task,
+            result: None,
+            progress_token,
+        }
+    }
+}
+
 pub(super) fn start_mcp_server(
     runtime: Arc<tokio::runtime::Runtime>,
     address: SocketAddr,
@@ -133,6 +182,7 @@ pub(super) fn start_mcp_server(
     client_sinks: Arc<Mutex<Vec<ClientSink>>>,
     server_info: Arc<RwLock<McpServerInfo>>,
     subscriptions: Arc<Mutex<HashMap<String, Vec<ClientSink>>>>,
+    tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
 ) -> Result<McpServerState, Box<dyn Error>> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -145,6 +195,7 @@ pub(super) fn start_mcp_server(
         client_sinks,
         server_info,
         subscriptions,
+        tasks,
     });
 
     let service = StreamableHttpService::new(
@@ -198,6 +249,7 @@ fn start_mcp_server_with_listener(
     client_sinks: Arc<Mutex<Vec<ClientSink>>>,
     server_info: Arc<RwLock<McpServerInfo>>,
     subscriptions: Arc<Mutex<HashMap<String, Vec<ClientSink>>>>,
+    tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
 ) -> Result<McpServerState, Box<dyn Error>> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -210,6 +262,7 @@ fn start_mcp_server_with_listener(
         client_sinks,
         server_info,
         subscriptions,
+        tasks,
     });
 
     let service = StreamableHttpService::new(
@@ -496,6 +549,7 @@ struct McpBridgeHandler {
     client_sinks: Arc<Mutex<Vec<ClientSink>>>,
     server_info: Arc<RwLock<McpServerInfo>>,
     subscriptions: Arc<Mutex<HashMap<String, Vec<ClientSink>>>>,
+    tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
 }
 
 impl McpBridgeHandler {
@@ -566,6 +620,103 @@ impl McpBridgeHandler {
 
         let _ = self.emit_event("MCP_NOTIFICATION", payload);
     }
+
+    async fn create_task_entry(
+        &self,
+        request: &CallToolRequestParams,
+    ) -> Result<Task, McpError> {
+        let task_id = self
+            .request_counter
+            .fetch_add(1, Ordering::Relaxed)
+            .to_string();
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let task = Task::new(
+            task_id.clone(),
+            TaskStatus::Working,
+            timestamp.clone(),
+            timestamp,
+        )
+        .with_status_message(format!("Tool {} is running", request.name))
+        .with_poll_interval(1_000);
+        let progress_token = request.meta.as_ref().and_then(|meta| meta.get_progress_token());
+
+        let mut tasks = self.tasks.lock().await;
+        tasks.insert(task_id, TaskEntry::new(task.clone(), progress_token));
+        Ok(task)
+    }
+
+    async fn update_task_status(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        let mut tasks = self.tasks.lock().await;
+        let entry = tasks
+            .get_mut(task_id)
+            .ok_or_else(|| "Не найдена MCP задача".to_owned())?;
+        entry.task.status = status;
+        entry.task.status_message = message;
+        entry.task.last_updated_at = chrono::Utc::now().to_rfc3339();
+        Ok(())
+    }
+
+    async fn complete_task(&self, task_id: &str, response: McpResponse) -> Result<(), String> {
+        let parsed = parse_mcp_response::<serde_json::Value>(response);
+        let mut tasks = self.tasks.lock().await;
+        let entry = tasks
+            .get_mut(task_id)
+            .ok_or_else(|| "Не найдена MCP задача".to_owned())?;
+        entry.task.last_updated_at = chrono::Utc::now().to_rfc3339();
+        match parsed {
+            Ok(result) => {
+                entry.task.status = TaskStatus::Completed;
+                entry.task.status_message = Some("Task completed".to_owned());
+                entry.result = Some(Ok(result));
+            }
+            Err(error) => {
+                entry.task.status = TaskStatus::Failed;
+                entry.task.status_message = Some(error.message.to_string());
+                entry.result = Some(Err(error));
+            }
+        }
+        Ok(())
+    }
+
+    async fn notify_task_progress(
+        &self,
+        task_id: &str,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        let progress_token = {
+            let mut tasks = self.tasks.lock().await;
+            let entry = tasks
+                .get_mut(task_id)
+                .ok_or_else(|| "Не найдена MCP задача".to_owned())?;
+            entry.task.last_updated_at = chrono::Utc::now().to_rfc3339();
+            if let Some(message) = message.as_ref() {
+                entry.task.status_message = Some(message.clone());
+            }
+            entry.progress_token.clone()
+        }
+        .ok_or_else(|| "Для MCP задачи не задан progressToken".to_owned())?;
+
+        let mut params = ProgressNotificationParam::new(progress_token, progress);
+        if let Some(total) = total {
+            params = params.with_total(total);
+        }
+        if let Some(message) = message {
+            params = params.with_message(message);
+        }
+        let notification =
+            rmcp::model::ServerNotification::ProgressNotification(ProgressNotification::new(
+                params,
+            ));
+        self.broadcast_notification(notification).await;
+        Ok(())
+    }
 }
 
 async fn send_to_sinks(sinks: &[ClientSink], notification: rmcp::model::ServerNotification) {
@@ -627,6 +778,16 @@ impl ServerHandler for McpBridgeHandler {
             let capabilities = ServerCapabilities::builder()
                 .enable_tools()
                 .enable_tool_list_changed()
+                .enable_tasks_with(TasksCapability {
+                    requests: Some(TaskRequestsCapability {
+                        tools: Some(ToolsTaskCapability {
+                            call: Some(serde_json::Map::new()),
+                        }),
+                        ..Default::default()
+                    }),
+                    list: Some(serde_json::Map::new()),
+                    cancel: Some(serde_json::Map::new()),
+                })
                 .enable_resources()
                 .enable_resources_list_changed()
                 .enable_resources_subscribe()
@@ -668,6 +829,13 @@ impl ServerHandler for McpBridgeHandler {
             };
             Ok(ListToolsResult::with_all_items(tools))
         }
+    }
+
+    fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
+        self.registry
+            .read()
+            .ok()
+            .and_then(|guard| guard.get_tool(name).map(|entry| entry.tool))
     }
 
     fn call_tool(
@@ -712,11 +880,68 @@ impl ServerHandler for McpBridgeHandler {
                 None => serde_json::Value::Null,
             };
             let payload = serde_json::json!({
+                "executionMode": "sync",
                 "name": request.name,
                 "arguments": args_payload,
+                "progressToken": request.meta.as_ref().and_then(|meta| meta.get_progress_token()),
             });
 
             self.dispatch_request("MCP_TOOL_CALL", payload).await
+        }
+    }
+
+    fn enqueue_task(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<rmcp::model::CreateTaskResult, McpError>> + Send + '_
+    {
+        async move {
+            let _entry = {
+                let guard = self
+                    .registry
+                    .read()
+                    .map_err(|_| McpError::internal_error("Registry lock poisoned", None))?;
+                guard.get_tool(request.name.as_ref())
+            }
+            .ok_or_else(|| McpError::invalid_params("tool not found", None))?;
+
+            #[cfg(feature = "validate-schema")]
+            {
+                let validation_value = match request.arguments.clone() {
+                    Some(map) => serde_json::Value::Object(map),
+                    None => serde_json::Value::Object(serde_json::Map::new()),
+                };
+                let errors = _entry
+                    .schema
+                    .iter_errors(&validation_value)
+                    .map(|err| err.to_string())
+                    .collect::<Vec<_>>();
+                if !errors.is_empty() {
+                    let message = errors.join("; ");
+                    let message = if message.is_empty() {
+                        "Invalid params".to_owned()
+                    } else {
+                        message
+                    };
+                    return Err(McpError::invalid_params(message, None));
+                }
+            }
+
+            let task = self.create_task_entry(&request).await?;
+            let args_payload = match request.arguments {
+                Some(map) => serde_json::Value::Object(map),
+                None => serde_json::Value::Null,
+            };
+            let payload = serde_json::json!({
+                "executionMode": "task",
+                "taskId": task.task_id,
+                "name": request.name,
+                "arguments": args_payload,
+                "progressToken": request.meta.as_ref().and_then(|meta| meta.get_progress_token()),
+            });
+            self.emit_event("MCP_TOOL_CALL", payload)?;
+            Ok(rmcp::model::CreateTaskResult::new(task))
         }
     }
 
@@ -967,6 +1192,81 @@ impl ServerHandler for McpBridgeHandler {
                 .await
         }
     }
+
+    fn list_tasks(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListTasksResult, McpError>> + Send + '_ {
+        async move {
+            let tasks = {
+                let tasks = self.tasks.lock().await;
+                tasks.values().map(|entry| entry.task.clone()).collect::<Vec<_>>()
+            };
+            Ok(ListTasksResult::new(tasks))
+        }
+    }
+
+    fn get_task_info(
+        &self,
+        request: GetTaskInfoParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<GetTaskResult, McpError>> + Send + '_ {
+        async move {
+            let task = {
+                let tasks = self.tasks.lock().await;
+                tasks.get(request.task_id.as_str()).map(|entry| entry.task.clone())
+            }
+            .ok_or_else(|| McpError::invalid_params("task not found", None))?;
+            Ok(GetTaskResult { meta: None, task })
+        }
+    }
+
+    fn get_task_result(
+        &self,
+        request: GetTaskResultParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<GetTaskPayloadResult, McpError>> + Send + '_ {
+        async move {
+            let result = {
+                let tasks = self.tasks.lock().await;
+                tasks.get(request.task_id.as_str()).and_then(|entry| entry.result.clone())
+            }
+            .ok_or_else(|| McpError::invalid_params("task result is not ready", None))?;
+            match result {
+                Ok(value) => Ok(GetTaskPayloadResult::new(value)),
+                Err(error) => Err(error),
+            }
+        }
+    }
+
+    fn cancel_task(
+        &self,
+        request: CancelTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<CancelTaskResult, McpError>> + Send + '_ {
+        async move {
+            let task = {
+                let mut tasks = self.tasks.lock().await;
+                let entry = tasks
+                    .get_mut(request.task_id.as_str())
+                    .ok_or_else(|| McpError::invalid_params("task not found", None))?;
+                entry.task.status = TaskStatus::Cancelled;
+                entry.task.status_message = Some("Task was cancelled".to_owned());
+                entry.task.last_updated_at = chrono::Utc::now().to_rfc3339();
+                entry.result = Some(Err(McpError::invalid_request(
+                    "Task was cancelled",
+                    None,
+                )));
+                entry.task.clone()
+            };
+            let _ = self.emit_event(
+                "MCP_TASK_CANCELLED",
+                serde_json::json!({ "taskId": request.task_id }),
+            );
+            Ok(CancelTaskResult { meta: None, task })
+        }
+    }
 }
 
 fn insert_request_id(
@@ -1044,6 +1344,7 @@ mod tests {
         let registry = Arc::new(RwLock::new(registry));
         let client_sinks = Arc::new(Mutex::new(Vec::new()));
         let server_info = Arc::new(RwLock::new(McpServerInfo::default()));
+        let tasks = Arc::new(Mutex::new(HashMap::new()));
 
         let (state_tx, state_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1066,6 +1367,7 @@ mod tests {
                 client_sinks,
                 server_info,
                 Arc::new(Mutex::new(HashMap::new())),
+                tasks,
             )
             .unwrap();
             let _ = state_tx.send(state);
@@ -1117,6 +1419,47 @@ mod tests {
             registry.register_tool(tool);
         }
         registry
+    }
+
+    fn make_registry_with_required_task_tool() -> Registry {
+        use rmcp::model::Tool;
+        let mut registry = Registry::default();
+        let tool: Tool = serde_json::from_value(serde_json::json!({
+            "name": "long_job",
+            "description": "Long-running job",
+            "inputSchema": {
+                "type": "object"
+            },
+            "execution": {
+                "taskSupport": "required"
+            }
+        }))
+        .unwrap();
+        #[cfg(feature = "validate-schema")]
+        {
+            let schema_value = serde_json::Value::Object(tool.input_schema.as_ref().clone());
+            let schema = jsonschema::validator_for(&schema_value).unwrap();
+            registry.register_tool(tool, schema);
+        }
+        #[cfg(not(feature = "validate-schema"))]
+        {
+            registry.register_tool(tool);
+        }
+        registry
+    }
+
+    fn make_test_handler(registry: Registry) -> Arc<McpBridgeHandler> {
+        Arc::new(McpBridgeHandler {
+            connection: None,
+            response_map: Arc::new(Mutex::new(HashMap::new())),
+            request_counter: Arc::new(AtomicU64::new(1)),
+            registry: Arc::new(RwLock::new(registry)),
+            response_timeout: Duration::from_millis(200),
+            client_sinks: Arc::new(Mutex::new(Vec::new())),
+            server_info: Arc::new(RwLock::new(McpServerInfo::default())),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     fn make_registry_with_resource() -> Registry {
@@ -1221,6 +1564,74 @@ mod tests {
         let result: Result<serde_json::Value, _> = parse_mcp_response(resp);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("500"));
+    }
+
+    #[tokio::test]
+    async fn complete_task_stores_terminal_result() {
+        let handler = make_test_handler(Registry::default());
+        let task = Task::new(
+            "task-1".to_owned(),
+            TaskStatus::Working,
+            "2026-01-01T00:00:00Z".to_owned(),
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        handler
+            .tasks
+            .lock()
+            .await
+            .insert("task-1".to_owned(), TaskEntry::new(task, None));
+
+        handler
+            .complete_task(
+                "task-1",
+                McpResponse {
+                    status: 200,
+                    headers: HashMap::new(),
+                    body: r#"{"result":{"content":[{"type":"text","text":"done"}]}}"#.to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let tasks = handler.tasks.lock().await;
+        let entry = tasks.get("task-1").unwrap();
+        assert_eq!(entry.task.status, TaskStatus::Completed);
+        assert_eq!(
+            entry.result,
+            Some(Ok(serde_json::json!({
+                "content": [{"type":"text","text":"done"}]
+            })))
+        );
+    }
+
+    #[tokio::test]
+    async fn update_task_status_changes_state() {
+        let handler = make_test_handler(Registry::default());
+        let task = Task::new(
+            "task-2".to_owned(),
+            TaskStatus::Working,
+            "2026-01-01T00:00:00Z".to_owned(),
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        handler
+            .tasks
+            .lock()
+            .await
+            .insert("task-2".to_owned(), TaskEntry::new(task, None));
+
+        handler
+            .update_task_status(
+                "task-2",
+                TaskStatus::InputRequired,
+                Some("Need input".to_owned()),
+            )
+            .await
+            .unwrap();
+
+        let tasks = handler.tasks.lock().await;
+        let entry = tasks.get("task-2").unwrap();
+        assert_eq!(entry.task.status, TaskStatus::InputRequired);
+        assert_eq!(entry.task.status_message.as_deref(), Some("Need input"));
     }
 
     // ── normalize_protocol_version ───────────────────────────────────────────
@@ -1366,6 +1777,23 @@ mod tests {
             let result = client.list_tools(None).await.unwrap();
             assert_eq!(result.tools.len(), 1);
             assert_eq!(result.tools[0].name.as_ref(), "greet");
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_list_tools_preserves_task_support_metadata() {
+            let registry = make_registry_with_required_task_tool();
+            let (base, _state) = start_test_server(registry).await;
+            let client = connect(&base).await;
+            let result = client.list_tools(None).await.unwrap();
+            assert_eq!(result.tools.len(), 1);
+            assert_eq!(
+                result.tools[0]
+                    .execution
+                    .as_ref()
+                    .and_then(|execution| execution.task_support),
+                Some(rmcp::model::TaskSupport::Required)
+            );
             client.cancel().await.unwrap();
         }
 

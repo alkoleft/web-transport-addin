@@ -26,6 +26,7 @@ pub struct McpAddIn {
     pub(super) client_sinks: Arc<Mutex<Vec<ClientSink>>>,
     pub(super) server_info: Arc<RwLock<McpServerInfo>>,
     pub(super) subscriptions: Arc<Mutex<HashMap<String, Vec<ClientSink>>>>,
+    pub(super) tasks: Arc<Mutex<HashMap<String, super::server::TaskEntry>>>,
     last_error: Option<Box<dyn Error>>,
 }
 
@@ -77,6 +78,12 @@ impl McpAddIn {
         let timeout_secs = timeout_secs.get_i32()?;
         let timeout_secs = if timeout_secs <= 0 { 30 } else { timeout_secs };
 
+        let tasks = self.tasks.clone();
+        self.runtime.clone().block_on(async {
+            let mut guard = tasks.lock().await;
+            guard.clear();
+        });
+
         let server = start_mcp_server(
             self.runtime.clone(),
             addr,
@@ -89,6 +96,7 @@ impl McpAddIn {
             self.client_sinks.clone(),
             self.server_info.clone(),
             self.subscriptions.clone(),
+            self.tasks.clone(),
         )?;
 
         self.server = Some(server);
@@ -102,9 +110,12 @@ impl McpAddIn {
         };
 
         let response_map = self.response_map.clone();
+        let tasks = self.tasks.clone();
         self.runtime.clone().block_on(async {
             let mut map = response_map.lock().await;
             map.clear();
+            let mut tasks = tasks.lock().await;
+            tasks.clear();
         });
 
         let _ = server.shutdown.send(());
@@ -147,6 +158,103 @@ impl McpAddIn {
             sender.send(response).map_err(|_| -> Box<dyn Error> {
                 "Не удалось отправить ответ".to_owned().into()
             })?;
+            return_value.set_bool(true);
+            Ok(())
+        })
+    }
+
+    fn mcp_complete_task(
+        &mut self,
+        task_id: &mut Variant,
+        status_code: &mut Variant,
+        json_headers: &mut Variant,
+        body: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
+        let task_id = task_id.get_string()?;
+        let status_code = status_code.get_i32()?;
+        if !(100..=599).contains(&status_code) {
+            return Err("Некорректный HTTP статус".to_owned().into());
+        }
+        let json_headers = json_headers.get_string()?;
+        let body = body.get_string()?;
+        let headers = parse_headers(json_headers)?;
+        let response = McpResponse {
+            status: status_code as u16,
+            headers,
+            body,
+        };
+
+        let Some(server) = self.server.as_ref() else {
+            return Err("MCP сервер не запущен".to_owned().into());
+        };
+
+        self.runtime.clone().block_on(async {
+            server
+                .complete_task(task_id.as_str(), response)
+                .await
+                .map_err(|err| -> Box<dyn Error> { err.into() })?;
+            return_value.set_bool(true);
+            Ok(())
+        })
+    }
+
+    fn mcp_set_task_status(
+        &mut self,
+        task_id: &mut Variant,
+        status: &mut Variant,
+        message: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
+        let task_id = task_id.get_string()?;
+        let status = parse_task_status(status.get_string()?.as_str())?;
+        let message = match message.get_string() {
+            Ok(value) if !value.trim().is_empty() => Some(value),
+            _ => None,
+        };
+
+        let Some(server) = self.server.as_ref() else {
+            return Err("MCP сервер не запущен".to_owned().into());
+        };
+
+        self.runtime.clone().block_on(async {
+            server
+                .update_task_status(task_id.as_str(), status, message)
+                .await
+                .map_err(|err| -> Box<dyn Error> { err.into() })?;
+            return_value.set_bool(true);
+            Ok(())
+        })
+    }
+
+    fn mcp_notify_task_progress(
+        &mut self,
+        task_id: &mut Variant,
+        progress: &mut Variant,
+        total: &mut Variant,
+        message: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
+        let task_id = task_id.get_string()?;
+        let progress = progress.get_f64()?;
+        let total = match total.get_f64() {
+            Ok(value) if value >= 0.0 => Some(value),
+            _ => None,
+        };
+        let message = match message.get_string() {
+            Ok(value) if !value.trim().is_empty() => Some(value),
+            _ => None,
+        };
+
+        let Some(server) = self.server.as_ref() else {
+            return Err("MCP сервер не запущен".to_owned().into());
+        };
+
+        self.runtime.clone().block_on(async {
+            server
+                .notify_task_progress(task_id.as_str(), progress, total, message)
+                .await
+                .map_err(|err| -> Box<dyn Error> { err.into() })?;
             return_value.set_bool(true);
             Ok(())
         })
@@ -464,6 +572,18 @@ impl SimpleAddin for McpAddIn {
                 method: Methods::Method4(Self::mcp_send_response),
             },
             MethodInfo {
+                name: name!("ЗавершитьMCPЗадачу"),
+                method: Methods::Method4(Self::mcp_complete_task),
+            },
+            MethodInfo {
+                name: name!("УстановитьСтатусMCPЗадачи"),
+                method: Methods::Method3(Self::mcp_set_task_status),
+            },
+            MethodInfo {
+                name: name!("УведомитьОПрогрессеMCPЗадачи"),
+                method: Methods::Method4(Self::mcp_notify_task_progress),
+            },
+            MethodInfo {
                 name: name!("УстановитьРазрешенныеOrigins"),
                 method: Methods::Method1(Self::mcp_set_allowed_origins),
             },
@@ -564,6 +684,7 @@ impl Default for McpAddIn {
             client_sinks: Arc::new(Mutex::new(Vec::new())),
             server_info: Arc::new(RwLock::new(McpServerInfo::default())),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
             runtime: Arc::new(Runtime::new().unwrap()),
         }
     }
@@ -596,6 +717,17 @@ fn parse_resource_template(value: Value) -> Result<rmcp::model::ResourceTemplate
         .map_err(|err| format!("Некорректный шаблон ресурса: {err}").into())
 }
 
+fn parse_task_status(raw: &str) -> Result<rmcp::model::TaskStatus, Box<dyn Error>> {
+    match raw.trim() {
+        "working" => Ok(rmcp::model::TaskStatus::Working),
+        "input_required" => Ok(rmcp::model::TaskStatus::InputRequired),
+        "completed" => Ok(rmcp::model::TaskStatus::Completed),
+        "failed" => Ok(rmcp::model::TaskStatus::Failed),
+        "cancelled" => Ok(rmcp::model::TaskStatus::Cancelled),
+        _ => Err("Некорректный статус MCP задачи".to_owned().into()),
+    }
+}
+
 #[cfg(feature = "validate-schema")]
 fn compile_schema(schema: Value) -> Result<Validator, Box<dyn Error>> {
     let options = jsonschema::options()
@@ -609,7 +741,7 @@ fn compile_schema(schema: Value) -> Result<Validator, Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_json_items, parse_resource_template};
+    use super::{parse_json_items, parse_resource_template, parse_task_status};
     use serde_json::json;
 
     #[test]
@@ -639,5 +771,22 @@ mod tests {
         }))
         .expect_err("invalid template should fail");
         assert!(error.to_string().contains("Некорректный шаблон ресурса"));
+    }
+
+    #[test]
+    fn parse_task_status_accepts_known_values() {
+        assert_eq!(
+            parse_task_status("working").unwrap(),
+            rmcp::model::TaskStatus::Working
+        );
+        assert_eq!(
+            parse_task_status("input_required").unwrap(),
+            rmcp::model::TaskStatus::InputRequired
+        );
+        assert_eq!(
+            parse_task_status("completed").unwrap(),
+            rmcp::model::TaskStatus::Completed
+        );
+        assert!(parse_task_status("unknown").is_err());
     }
 }

@@ -1,0 +1,4 @@
+[mcp_servers.v8_mcp_demo]
+url = "http://localhost:8082/mcp"
+disabled = false
+alwaysAllow = []
