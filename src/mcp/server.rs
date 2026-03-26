@@ -612,6 +612,17 @@ impl McpBridgeHandler {
         Ok(())
     }
 
+    fn request_progress_token(
+        request: &CallToolRequestParams,
+        fallback_meta: &rmcp::model::Meta,
+    ) -> Option<rmcp::model::ProgressToken> {
+        request
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get_progress_token())
+            .or_else(|| fallback_meta.get_progress_token())
+    }
+
     async fn dispatch_notification(&self, method: &str, params: Option<serde_json::Value>) {
         let payload = serde_json::json!({
             "method": method,
@@ -624,6 +635,7 @@ impl McpBridgeHandler {
     async fn create_task_entry(
         &self,
         request: &CallToolRequestParams,
+        context: &RequestContext<RoleServer>,
     ) -> Result<Task, McpError> {
         let task_id = self
             .request_counter
@@ -638,7 +650,7 @@ impl McpBridgeHandler {
         )
         .with_status_message(format!("Tool {} is running", request.name))
         .with_poll_interval(1_000);
-        let progress_token = request.meta.as_ref().and_then(|meta| meta.get_progress_token());
+        let progress_token = Self::request_progress_token(request, &context.meta);
 
         let mut tasks = self.tasks.lock().await;
         tasks.insert(task_id, TaskEntry::new(task.clone(), progress_token));
@@ -841,7 +853,7 @@ impl ServerHandler for McpBridgeHandler {
     fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
         async move {
             let _entry = {
@@ -875,6 +887,7 @@ impl ServerHandler for McpBridgeHandler {
                 }
             }
 
+            let progress_token = Self::request_progress_token(&request, &context.meta);
             let args_payload = match request.arguments {
                 Some(map) => serde_json::Value::Object(map),
                 None => serde_json::Value::Null,
@@ -883,7 +896,7 @@ impl ServerHandler for McpBridgeHandler {
                 "executionMode": "sync",
                 "name": request.name,
                 "arguments": args_payload,
-                "progressToken": request.meta.as_ref().and_then(|meta| meta.get_progress_token()),
+                "progressToken": progress_token,
             });
 
             self.dispatch_request("MCP_TOOL_CALL", payload).await
@@ -893,7 +906,7 @@ impl ServerHandler for McpBridgeHandler {
     fn enqueue_task(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<rmcp::model::CreateTaskResult, McpError>> + Send + '_
     {
         async move {
@@ -928,7 +941,8 @@ impl ServerHandler for McpBridgeHandler {
                 }
             }
 
-            let task = self.create_task_entry(&request).await?;
+            let task = self.create_task_entry(&request, &context).await?;
+            let progress_token = Self::request_progress_token(&request, &context.meta);
             let args_payload = match request.arguments {
                 Some(map) => serde_json::Value::Object(map),
                 None => serde_json::Value::Null,
@@ -938,7 +952,7 @@ impl ServerHandler for McpBridgeHandler {
                 "taskId": task.task_id,
                 "name": request.name,
                 "arguments": args_payload,
-                "progressToken": request.meta.as_ref().and_then(|meta| meta.get_progress_token()),
+                "progressToken": progress_token,
             });
             self.emit_event("MCP_TOOL_CALL", payload)?;
             Ok(rmcp::model::CreateTaskResult::new(task))
@@ -1632,6 +1646,39 @@ mod tests {
         let entry = tasks.get("task-2").unwrap();
         assert_eq!(entry.task.status, TaskStatus::InputRequired);
         assert_eq!(entry.task.status_message.as_deref(), Some("Need input"));
+    }
+
+    #[test]
+    fn request_progress_token_falls_back_to_context_meta() {
+        let request = CallToolRequestParams::new("long_job");
+        let fallback_meta = rmcp::model::Meta::with_progress_token(ProgressToken(
+            rmcp::model::NumberOrString::Number(0),
+        ));
+
+        let token = McpBridgeHandler::request_progress_token(&request, &fallback_meta);
+
+        assert_eq!(token, fallback_meta.get_progress_token());
+    }
+
+    #[test]
+    fn request_progress_token_prefers_request_meta() {
+        let request: CallToolRequestParams = serde_json::from_value(serde_json::json!({
+            "name": "long_job",
+            "_meta": {
+                "progressToken": 7
+            }
+        }))
+        .unwrap();
+        let fallback_meta = rmcp::model::Meta::with_progress_token(ProgressToken(
+            rmcp::model::NumberOrString::Number(0),
+        ));
+
+        let token = McpBridgeHandler::request_progress_token(&request, &fallback_meta);
+
+        assert_eq!(
+            token,
+            Some(ProgressToken(rmcp::model::NumberOrString::Number(7)))
+        );
     }
 
     // ── normalize_protocol_version ───────────────────────────────────────────

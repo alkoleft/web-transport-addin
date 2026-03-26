@@ -236,8 +236,8 @@ impl McpAddIn {
         return_value: &mut Variant,
     ) -> AddinResult {
         let task_id = task_id.get_string()?;
-        let progress = progress.get_f64()?;
-        let total = match total.get_f64() {
+        let progress = parse_numeric_arg(progress)?;
+        let total = match parse_numeric_arg(total) {
             Ok(value) if value >= 0.0 => Some(value),
             _ => None,
         };
@@ -726,6 +726,13 @@ fn parse_task_status(raw: &str) -> Result<rmcp::model::TaskStatus, Box<dyn Error
         "cancelled" => Ok(rmcp::model::TaskStatus::Cancelled),
         _ => Err("Некорректный статус MCP задачи".to_owned().into()),
     }
+}
+
+fn parse_numeric_arg(value: &Variant) -> Result<f64, Box<dyn Error>> {
+    value
+        .get_f64()
+        .or_else(|_| value.get_i32().map(|number| number as f64))
+        .map_err(|err| -> Box<dyn Error> { err.into() })
 }
 
 #[cfg(feature = "validate-schema")]
