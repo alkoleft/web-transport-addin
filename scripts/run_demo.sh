@@ -14,6 +14,11 @@ die() {
   exit 1
 }
 
+reset_extcomp_cache() {
+  log "Resetting ExtComp cache: ~/.1cv8/1C/1cv8/ExtCompT/"
+  rm -rf ~/.1cv8/1C/1cv8/ExtCompT/
+}
+
 main() {
   if [[ -f "$ENV_FILE" ]]; then
     # shellcheck disable=SC1090
@@ -29,6 +34,8 @@ main() {
 
   [[ -n "$onec_enterprise" ]] || die "Set ONEC_ENTERPRISE to 1C executable (e.g. /opt/1C/v8.3/x86_64/1cv8)"
   [[ -n "$onec_ib" ]] || die "Set ONEC_IB_PATH to an existing infobase directory"
+
+  reset_extcomp_cache
 
   local auth=()
   if [[ -n "${ONEC_USER:-}" ]]; then

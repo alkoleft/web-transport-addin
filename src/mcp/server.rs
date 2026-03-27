@@ -155,20 +155,49 @@ pub(super) struct McpResponse {
     pub(super) body: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseMode {
+    SyncJson,
+    StreamSse,
+    Task,
+}
+
+impl ResponseMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            ResponseMode::SyncJson => "sync_json",
+            ResponseMode::StreamSse => "stream_sse",
+            ResponseMode::Task => "task",
+        }
+    }
+}
+
+#[derive(Clone)]
+enum TaskKind {
+    Public,
+    StreamSse { sink: ClientSink },
+}
+
+#[derive(Clone)]
 pub(super) struct TaskEntry {
     task: Task,
     result: Option<Result<serde_json::Value, McpError>>,
     progress_token: Option<ProgressToken>,
+    kind: TaskKind,
 }
 
 impl TaskEntry {
-    fn new(task: Task, progress_token: Option<ProgressToken>) -> Self {
+    fn new(task: Task, progress_token: Option<ProgressToken>, kind: TaskKind) -> Self {
         Self {
             task,
             result: None,
             progress_token,
+            kind,
         }
+    }
+
+    fn is_public(&self) -> bool {
+        matches!(self.kind, TaskKind::Public)
     }
 }
 
@@ -208,7 +237,7 @@ pub(super) fn start_mcp_server(
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig {
             stateful_mode: true,
-            json_response: true,
+            json_response: false,
             sse_keep_alive: None,
             sse_retry: None,
             cancellation_token: CancellationToken::new(),
@@ -275,7 +304,7 @@ fn start_mcp_server_with_listener(
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig {
             stateful_mode: true,
-            json_response: true,
+            json_response: false,
             sse_keep_alive: None,
             sse_retry: None,
             cancellation_token: CancellationToken::new(),
@@ -408,57 +437,10 @@ where
             }
 
             let mut response = inner.call(req).await?;
-            response = maybe_convert_sse_to_json(response).await;
             add_cors_headers(response.headers_mut(), origin.as_deref(), allow_any);
             Ok(response)
         })
     }
-}
-
-async fn maybe_convert_sse_to_json(response: BoxResponse) -> BoxResponse {
-    let is_sse = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.contains("text/event-stream"))
-        .unwrap_or(false);
-    let has_session_id = response.headers().contains_key("mcp-session-id");
-
-    if !is_sse || !has_session_id {
-        return response;
-    }
-
-    let session_id = response.headers().get("mcp-session-id").cloned();
-
-    let (parts, body) = response.into_parts();
-    let bytes = match body.collect().await {
-        Ok(b) => b.to_bytes(),
-        Err(_) => return Response::from_parts(parts, Full::new(Bytes::new()).boxed()),
-    };
-
-    // Extract JSON from SSE "data: {...}" line
-    let text = match std::str::from_utf8(&bytes) {
-        Ok(s) => s,
-        Err(_) => return Response::from_parts(parts, Full::new(bytes).boxed()),
-    };
-    let json_data = text
-        .lines()
-        .find(|line| line.starts_with("data:"))
-        .map(|line| line["data:".len()..].trim());
-
-    let Some(json) = json_data else {
-        return Response::from_parts(parts, Full::new(bytes).boxed());
-    };
-
-    let mut builder = Response::builder()
-        .status(parts.status)
-        .header("content-type", "application/json");
-    if let Some(sid) = session_id {
-        builder = builder.header("mcp-session-id", sid);
-    }
-    builder
-        .body(Full::new(Bytes::copy_from_slice(json.as_bytes())).boxed())
-        .unwrap_or_else(|_| Response::from_parts(parts, Full::new(bytes).boxed()))
 }
 
 async fn intercept_orphan_initialized(req: AxumRequest, next: Next) -> Response<Body> {
@@ -562,11 +544,56 @@ struct McpBridgeHandler {
 }
 
 impl McpBridgeHandler {
-    fn tool_requires_task(tool: &rmcp::model::Tool) -> bool {
+    fn task_support(tool: &rmcp::model::Tool) -> TaskSupport {
         tool.execution
             .as_ref()
             .and_then(|execution| execution.task_support)
-            == Some(TaskSupport::Required)
+            .unwrap_or(TaskSupport::Forbidden)
+    }
+
+    fn request_response_mode(request: &CallToolRequestParams) -> Result<ResponseMode, McpError> {
+        let raw = request
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("responseMode"))
+            .and_then(|value| value.as_str());
+        match raw {
+            None => Ok(ResponseMode::SyncJson),
+            Some("sync_json") => Ok(ResponseMode::SyncJson),
+            Some("stream_sse") => Ok(ResponseMode::StreamSse),
+            Some("task") => Ok(ResponseMode::Task),
+            Some(_) => Err(McpError::invalid_params("Unsupported responseMode", None)),
+        }
+    }
+
+    fn normalize_tool_for_rmcp(tool: rmcp::model::Tool) -> rmcp::model::Tool {
+        let mut tool = tool;
+        if Self::task_support(&tool) == TaskSupport::Required {
+            let execution = tool.execution.take().unwrap_or_default();
+            tool.execution = Some(execution.with_task_support(TaskSupport::Optional));
+        }
+        tool
+    }
+
+    fn ensure_response_mode_allowed(
+        task_support: TaskSupport,
+        response_mode: ResponseMode,
+    ) -> Result<(), McpError> {
+        match (task_support, response_mode) {
+            (TaskSupport::Forbidden, ResponseMode::SyncJson)
+            | (TaskSupport::Optional, _)
+            | (TaskSupport::Required, ResponseMode::StreamSse)
+            | (TaskSupport::Required, ResponseMode::Task) => Ok(()),
+            (TaskSupport::Forbidden, ResponseMode::StreamSse)
+            | (TaskSupport::Forbidden, ResponseMode::Task) => Err(McpError::invalid_params(
+                "Tool does not support streaming or task-based invocation",
+                None,
+            )),
+            (TaskSupport::Required, ResponseMode::SyncJson) => Err(McpError::invalid_params(
+                "Tool requires streaming or task-based invocation",
+                None,
+            )),
+        }
     }
 
     async fn dispatch_request<T>(
@@ -647,20 +674,32 @@ impl McpBridgeHandler {
             .map_err(|_| McpError::internal_error("Handler timeout", None))?
     }
 
-    async fn call_task_tool_sync_compat(
+    async fn call_stream_tool(
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let task = self.create_task_entry(&request, &context).await?;
+        let task = self
+            .create_task_entry(
+                &request,
+                &context,
+                TaskKind::StreamSse {
+                    sink: context.peer.clone(),
+                },
+            )
+            .await?;
         let task_id = task.task_id.clone();
-        let progress_token = Self::request_progress_token(&request, &context.meta);
+        let progress_token = self
+            .task_progress_token(task_id.as_str())
+            .await
+            .map(progress_token_to_json);
         let args_payload = match request.arguments {
             Some(map) => serde_json::Value::Object(map),
             None => serde_json::Value::Null,
         };
         let payload = serde_json::json!({
             "executionMode": "task",
+            "responseMode": ResponseMode::StreamSse.as_str(),
             "taskId": task_id,
             "name": request.name,
             "arguments": args_payload,
@@ -722,6 +761,7 @@ impl McpBridgeHandler {
         &self,
         request: &CallToolRequestParams,
         context: &RequestContext<RoleServer>,
+        kind: TaskKind,
     ) -> Result<Task, McpError> {
         let task_id = self
             .request_counter
@@ -736,11 +776,22 @@ impl McpBridgeHandler {
         )
         .with_status_message(format!("Tool {} is running", request.name))
         .with_poll_interval(1_000);
-        let progress_token = Self::request_progress_token(request, &context.meta);
+        let progress_token = Self::request_progress_token(request, &context.meta).or_else(|| {
+            Some(ProgressToken(rmcp::model::NumberOrString::String(
+                task_id.clone().into(),
+            )))
+        });
 
         let mut tasks = self.tasks.lock().await;
-        tasks.insert(task_id, TaskEntry::new(task.clone(), progress_token));
+        tasks.insert(task_id, TaskEntry::new(task.clone(), progress_token, kind));
         Ok(task)
+    }
+
+    async fn task_progress_token(&self, task_id: &str) -> Option<ProgressToken> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .get(task_id)
+            .and_then(|entry| entry.progress_token.clone())
     }
 
     async fn update_task_status(
@@ -788,7 +839,7 @@ impl McpBridgeHandler {
         total: Option<f64>,
         message: Option<String>,
     ) -> Result<(), String> {
-        let progress_token = {
+        let (progress_token, kind) = {
             let mut tasks = self.tasks.lock().await;
             let entry = tasks
                 .get_mut(task_id)
@@ -797,9 +848,10 @@ impl McpBridgeHandler {
             if let Some(message) = message.as_ref() {
                 entry.task.status_message = Some(message.clone());
             }
-            entry.progress_token.clone()
-        }
-        .ok_or_else(|| "Для MCP задачи не задан progressToken".to_owned())?;
+            (entry.progress_token.clone(), entry.kind.clone())
+        };
+        let progress_token =
+            progress_token.ok_or_else(|| "Для MCP задачи не задан progressToken".to_owned())?;
 
         let mut params = ProgressNotificationParam::new(progress_token, progress);
         if let Some(total) = total {
@@ -811,7 +863,12 @@ impl McpBridgeHandler {
         let notification = rmcp::model::ServerNotification::ProgressNotification(
             ProgressNotification::new(params),
         );
-        self.broadcast_notification(notification).await;
+        match kind {
+            TaskKind::Public => self.broadcast_notification(notification).await,
+            TaskKind::StreamSse { sink } => {
+                let _ = sink.send_notification(notification).await;
+            }
+        }
         Ok(())
     }
 }
@@ -931,7 +988,11 @@ impl ServerHandler for McpBridgeHandler {
         self.registry
             .read()
             .ok()
-            .and_then(|guard| guard.get_tool(name).map(|entry| entry.tool))
+            .and_then(|guard| {
+                guard
+                    .get_tool(name)
+                    .map(|entry| Self::normalize_tool_for_rmcp(entry.tool))
+            })
     }
 
     fn call_tool(
@@ -971,8 +1032,22 @@ impl ServerHandler for McpBridgeHandler {
                 }
             }
 
-            if Self::tool_requires_task(&entry.tool) {
-                return self.call_task_tool_sync_compat(request, context).await;
+            let task_support = Self::task_support(&entry.tool);
+            let mut response_mode = Self::request_response_mode(&request)?;
+            if task_support == TaskSupport::Required && response_mode == ResponseMode::SyncJson {
+                response_mode = ResponseMode::StreamSse;
+            }
+            Self::ensure_response_mode_allowed(task_support, response_mode)?;
+
+            if response_mode == ResponseMode::Task {
+                return Err(McpError::invalid_params(
+                    "Use task-augmented tools/call for responseMode=task",
+                    None,
+                ));
+            }
+
+            if response_mode == ResponseMode::StreamSse {
+                return self.call_stream_tool(request, context).await;
             }
 
             let progress_token = Self::request_progress_token(&request, &context.meta);
@@ -982,9 +1057,10 @@ impl ServerHandler for McpBridgeHandler {
             };
             let payload = serde_json::json!({
                 "executionMode": "sync",
+                "responseMode": ResponseMode::SyncJson.as_str(),
                 "name": request.name,
                 "arguments": args_payload,
-                "progressToken": progress_token,
+                "progressToken": progress_token.map(progress_token_to_json),
             });
 
             self.dispatch_request("MCP_TOOL_CALL", payload).await
@@ -998,7 +1074,7 @@ impl ServerHandler for McpBridgeHandler {
     ) -> impl std::future::Future<Output = Result<rmcp::model::CreateTaskResult, McpError>> + Send + '_
     {
         async move {
-            let _entry = {
+            let entry = {
                 let guard = self
                     .registry
                     .read()
@@ -1013,7 +1089,7 @@ impl ServerHandler for McpBridgeHandler {
                     Some(map) => serde_json::Value::Object(map),
                     None => serde_json::Value::Object(serde_json::Map::new()),
                 };
-                let errors = _entry
+                let errors = entry
                     .schema
                     .iter_errors(&validation_value)
                     .map(|err| err.to_string())
@@ -1029,14 +1105,23 @@ impl ServerHandler for McpBridgeHandler {
                 }
             }
 
-            let task = self.create_task_entry(&request, &context).await?;
-            let progress_token = Self::request_progress_token(&request, &context.meta);
+            let task_support = Self::task_support(&entry.tool);
+            Self::ensure_response_mode_allowed(task_support, ResponseMode::Task)?;
+
+            let task = self
+                .create_task_entry(&request, &context, TaskKind::Public)
+                .await?;
+            let progress_token = self
+                .task_progress_token(task.task_id.as_str())
+                .await
+                .map(progress_token_to_json);
             let args_payload = match request.arguments {
                 Some(map) => serde_json::Value::Object(map),
                 None => serde_json::Value::Null,
             };
             let payload = serde_json::json!({
                 "executionMode": "task",
+                "responseMode": ResponseMode::Task.as_str(),
                 "taskId": task.task_id,
                 "name": request.name,
                 "arguments": args_payload,
@@ -1302,6 +1387,7 @@ impl ServerHandler for McpBridgeHandler {
                 let tasks = self.tasks.lock().await;
                 tasks
                     .values()
+                    .filter(|entry| entry.is_public())
                     .map(|entry| entry.task.clone())
                     .collect::<Vec<_>>()
             };
@@ -1319,6 +1405,7 @@ impl ServerHandler for McpBridgeHandler {
                 let tasks = self.tasks.lock().await;
                 tasks
                     .get(request.task_id.as_str())
+                    .filter(|entry| entry.is_public())
                     .map(|entry| entry.task.clone())
             }
             .ok_or_else(|| McpError::invalid_params("task not found", None))?;
@@ -1336,6 +1423,7 @@ impl ServerHandler for McpBridgeHandler {
                 let tasks = self.tasks.lock().await;
                 tasks
                     .get(request.task_id.as_str())
+                    .filter(|entry| entry.is_public())
                     .and_then(|entry| entry.result.clone())
             }
             .ok_or_else(|| McpError::invalid_params("task result is not ready", None))?;
@@ -1356,6 +1444,7 @@ impl ServerHandler for McpBridgeHandler {
                 let mut tasks = self.tasks.lock().await;
                 let entry = tasks
                     .get_mut(request.task_id.as_str())
+                    .filter(|entry| entry.is_public())
                     .ok_or_else(|| McpError::invalid_params("task not found", None))?;
                 entry.task.status = TaskStatus::Cancelled;
                 entry.task.status_message = Some("Task was cancelled".to_owned());
@@ -1382,6 +1471,13 @@ fn insert_request_id(
             Ok(serde_json::Value::Object(map))
         }
         _ => Err(McpError::internal_error("Invalid request payload", None)),
+    }
+}
+
+fn progress_token_to_json(token: ProgressToken) -> serde_json::Value {
+    match token.0 {
+        rmcp::model::NumberOrString::Number(value) => serde_json::Value::Number(value.into()),
+        rmcp::model::NumberOrString::String(value) => serde_json::Value::String(value.to_string()),
     }
 }
 
@@ -1678,11 +1774,10 @@ mod tests {
             "2026-01-01T00:00:00Z".to_owned(),
             "2026-01-01T00:00:00Z".to_owned(),
         );
-        handler
-            .tasks
-            .lock()
-            .await
-            .insert("task-1".to_owned(), TaskEntry::new(task, None));
+        handler.tasks.lock().await.insert(
+            "task-1".to_owned(),
+            TaskEntry::new(task, None, TaskKind::Public),
+        );
 
         handler
             .complete_task(
@@ -1716,11 +1811,10 @@ mod tests {
             "2026-01-01T00:00:00Z".to_owned(),
             "2026-01-01T00:00:00Z".to_owned(),
         );
-        handler
-            .tasks
-            .lock()
-            .await
-            .insert("task-2".to_owned(), TaskEntry::new(task, None));
+        handler.tasks.lock().await.insert(
+            "task-2".to_owned(),
+            TaskEntry::new(task, None, TaskKind::Public),
+        );
 
         handler
             .update_task_status(
@@ -1746,11 +1840,10 @@ mod tests {
             "2026-01-01T00:00:00Z".to_owned(),
             "2026-01-01T00:00:00Z".to_owned(),
         );
-        handler
-            .tasks
-            .lock()
-            .await
-            .insert("task-3".to_owned(), TaskEntry::new(task, None));
+        handler.tasks.lock().await.insert(
+            "task-3".to_owned(),
+            TaskEntry::new(task, None, TaskKind::Public),
+        );
 
         let handler_clone = handler.clone();
         tokio::spawn(async move {
@@ -1812,6 +1905,47 @@ mod tests {
             token,
             Some(ProgressToken(rmcp::model::NumberOrString::Number(7)))
         );
+    }
+
+    #[test]
+    fn request_response_mode_defaults_to_sync_json() {
+        let request = CallToolRequestParams::new("echo");
+        assert_eq!(
+            McpBridgeHandler::request_response_mode(&request).unwrap(),
+            ResponseMode::SyncJson
+        );
+    }
+
+    #[test]
+    fn request_response_mode_rejects_unknown_values() {
+        let request: CallToolRequestParams = serde_json::from_value(serde_json::json!({
+            "name": "echo",
+            "_meta": {
+                "responseMode": "unknown_mode"
+            }
+        }))
+        .unwrap();
+        let error = McpBridgeHandler::request_response_mode(&request).unwrap_err();
+        assert!(error.message.contains("Unsupported responseMode"));
+    }
+
+    #[test]
+    fn ensure_response_mode_allowed_respects_task_support() {
+        assert!(McpBridgeHandler::ensure_response_mode_allowed(
+            TaskSupport::Required,
+            ResponseMode::SyncJson,
+        )
+        .is_err());
+        assert!(McpBridgeHandler::ensure_response_mode_allowed(
+            TaskSupport::Required,
+            ResponseMode::StreamSse,
+        )
+        .is_ok());
+        assert!(McpBridgeHandler::ensure_response_mode_allowed(
+            TaskSupport::Forbidden,
+            ResponseMode::StreamSse,
+        )
+        .is_err());
     }
 
     // ── normalize_protocol_version ───────────────────────────────────────────
@@ -1916,6 +2050,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 202);
+    }
+
+    #[tokio::test]
+    async fn initialize_returns_sse_response_and_session_id() {
+        let (base, _state) = start_test_server(Registry::default()).await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/mcp");
+
+        let resp = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": { "name": "test-client", "version": "1.0.0" }
+                }
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert!(resp.headers().contains_key("mcp-session-id"));
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("text/event-stream")));
     }
 
     // ── rmcp client integration tests ───────────────────────────────────────
@@ -2023,6 +2190,24 @@ mod tests {
             assert!(
                 err.is_err(),
                 "calling tool without 1C connection should fail"
+            );
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_call_tool_required_task_rejects_sync_call() {
+            let registry = make_registry_with_required_task_tool();
+            let (base, _state) = start_test_server(registry).await;
+            let client = connect(&base).await;
+            let params = serde_json::from_value(serde_json::json!({
+                "name": "long_job",
+                "arguments": {}
+            }))
+            .unwrap();
+            let err = client.call_tool(params).await;
+            assert!(
+                err.is_err(),
+                "required-task tool should reject plain tools/call"
             );
             client.cancel().await.unwrap();
         }
