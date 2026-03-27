@@ -25,14 +25,28 @@ impl WsAddIn {
         json_headers: &mut Variant,
         return_value: &mut Variant,
     ) -> AddinResult {
-        ws_client::connect(&self.runtime, &mut self.websocket, address, json_headers, return_value)
+        ws_client::connect(
+            &self.runtime,
+            &mut self.websocket,
+            address,
+            json_headers,
+            return_value,
+        )
     }
 
-    pub(super) fn send(&mut self, message: &mut Variant, return_value: &mut Variant) -> AddinResult {
+    pub(super) fn send(
+        &mut self,
+        message: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
         ws_client::send(&self.runtime, &mut self.websocket, message, return_value)
     }
 
-    pub(super) fn receive(&mut self, timeout: &mut Variant, return_value: &mut Variant) -> AddinResult {
+    pub(super) fn receive(
+        &mut self,
+        timeout: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
         ws_client::receive(&self.runtime, &mut self.websocket, timeout, return_value)
     }
 

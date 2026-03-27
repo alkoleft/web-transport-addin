@@ -4,8 +4,8 @@ use futures_util::{
     SinkExt, StreamExt,
 };
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::runtime::Runtime;
 use tokio::net::TcpStream;
+use tokio::runtime::Runtime;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::http::{Request as WsRequest, Uri},
@@ -56,10 +56,7 @@ impl TryFrom<RequestData> for WsRequest<()> {
     type Error = String;
 
     fn try_from(data: RequestData) -> Result<Self, Self::Error> {
-        let uri = data
-            .address
-            .parse::<Uri>()
-            .map_err(|err| err.to_string())?;
+        let uri = data.address.parse::<Uri>().map_err(|err| err.to_string())?;
         let authority = uri
             .authority()
             .ok_or("No host name in the URL".to_string())?
@@ -81,9 +78,7 @@ impl TryFrom<RequestData> for WsRequest<()> {
         for (key, value) in data.headers.iter() {
             request_builder = request_builder.header(key.as_str(), value.as_str());
         }
-        request_builder
-            .body(())
-            .map_err(|error| error.to_string())
+        request_builder.body(()).map_err(|error| error.to_string())
     }
 }
 
@@ -120,7 +115,9 @@ pub(crate) fn send(
             Some(websocket) => {
                 websocket
                     .sender
-                    .send(tokio_tungstenite::tungstenite::Message::Text(message.into()))
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        message.into(),
+                    ))
                     .await?;
                 return_value.set_bool(true);
                 Ok(())

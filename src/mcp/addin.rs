@@ -443,11 +443,9 @@ impl McpAddIn {
         let Some(server) = self.server.as_ref() else {
             return Err("MCP сервер не запущен".to_owned().into());
         };
-        self.runtime.block_on(
-            server.broadcast_notification(
-                rmcp::model::ServerNotification::ToolListChangedNotification(Default::default()),
-            ),
-        );
+        self.runtime.block_on(server.broadcast_notification(
+            rmcp::model::ServerNotification::ToolListChangedNotification(Default::default()),
+        ));
         return_value.set_bool(true);
         Ok(())
     }
@@ -456,13 +454,9 @@ impl McpAddIn {
         let Some(server) = self.server.as_ref() else {
             return Err("MCP сервер не запущен".to_owned().into());
         };
-        self.runtime.block_on(
-            server.broadcast_notification(
-                rmcp::model::ServerNotification::ResourceListChangedNotification(
-                    Default::default(),
-                ),
-            ),
-        );
+        self.runtime.block_on(server.broadcast_notification(
+            rmcp::model::ServerNotification::ResourceListChangedNotification(Default::default()),
+        ));
         return_value.set_bool(true);
         Ok(())
     }
@@ -471,11 +465,9 @@ impl McpAddIn {
         let Some(server) = self.server.as_ref() else {
             return Err("MCP сервер не запущен".to_owned().into());
         };
-        self.runtime.block_on(
-            server.broadcast_notification(
-                rmcp::model::ServerNotification::PromptListChangedNotification(Default::default()),
-            ),
-        );
+        self.runtime.block_on(server.broadcast_notification(
+            rmcp::model::ServerNotification::PromptListChangedNotification(Default::default()),
+        ));
         return_value.set_bool(true);
         Ok(())
     }

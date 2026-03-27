@@ -67,7 +67,11 @@ struct HttpResponse {
 }
 
 impl HttpAddIn {
-    pub(super) fn http_start(&mut self, address: &mut Variant, return_value: &mut Variant) -> AddinResult {
+    pub(super) fn http_start(
+        &mut self,
+        address: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
         if self.http_server.is_some() {
             return Err("HTTP сервер уже запущен".to_owned().into());
         }
@@ -166,9 +170,9 @@ impl HttpAddIn {
             let sender = map
                 .remove(request_id.as_str())
                 .ok_or_else(|| "Не найден ожидающий ответ запрос".to_owned())?;
-            sender
-                .send(response)
-                .map_err(|_| -> Box<dyn Error> { "Не удалось отправить ответ".to_owned().into() })?;
+            sender.send(response).map_err(|_| -> Box<dyn Error> {
+                "Не удалось отправить ответ".to_owned().into()
+            })?;
             return_value.set_bool(true);
             Ok(())
         })
@@ -189,15 +193,19 @@ impl HttpAddIn {
                 .get(session_id.as_str())
                 .ok_or_else(|| "SSE сессия не найдена".to_owned())?;
             let payload = sse_format_message_event(data.as_str());
-            sender
-                .send(payload)
-                .map_err(|_| -> Box<dyn Error> { "Не удалось отправить SSE событие".to_owned().into() })?;
+            sender.send(payload).map_err(|_| -> Box<dyn Error> {
+                "Не удалось отправить SSE событие".to_owned().into()
+            })?;
             return_value.set_bool(true);
             Ok(())
         })
     }
 
-    pub(super) fn sse_close(&mut self, session_id: &mut Variant, return_value: &mut Variant) -> AddinResult {
+    pub(super) fn sse_close(
+        &mut self,
+        session_id: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
         let session_id = session_id.get_string()?;
         let sse_sessions = self.sse_sessions.clone();
         self.runtime.clone().block_on(async {
@@ -218,10 +226,7 @@ async fn handle_root() -> Response<Body> {
     response
 }
 
-async fn handle_mcp_route(
-    State(state): State<HttpAppState>,
-    req: Request<Body>,
-) -> Response<Body> {
+async fn handle_mcp_route(State(state): State<HttpAppState>, req: Request<Body>) -> Response<Body> {
     let mut response = match mcp_handler::handle_mcp_message(req, state.connection).await {
         Ok(response) => response,
         Err(err) => match err {},
@@ -301,9 +306,8 @@ async fn handle_http_request(
 
     match tokio::time::timeout(Duration::from_secs(HTTP_RESPONSE_TIMEOUT_SECS), response_rx).await {
         Ok(Ok(response)) => {
-            let mut builder = Response::builder().status(
-                StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK),
-            );
+            let mut builder = Response::builder()
+                .status(StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK));
             if response
                 .headers
                 .keys()
@@ -434,10 +438,7 @@ fn cors_preflight_response() -> Response<Body> {
 }
 
 fn add_cors_headers(headers: &mut HeaderMap) {
-    headers.insert(
-        "Access-Control-Allow-Origin",
-        HeaderValue::from_static("*"),
-    );
+    headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
     headers.insert(
         "Access-Control-Allow-Methods",
         HeaderValue::from_static("GET, POST, OPTIONS"),
@@ -446,10 +447,7 @@ fn add_cors_headers(headers: &mut HeaderMap) {
         "Access-Control-Allow-Headers",
         HeaderValue::from_static("content-type, authorization"),
     );
-    headers.insert(
-        "Access-Control-Max-Age",
-        HeaderValue::from_static("86400"),
-    );
+    headers.insert("Access-Control-Max-Age", HeaderValue::from_static("86400"));
 }
 
 fn get_query_param(query: &str, key: &str) -> Option<String> {

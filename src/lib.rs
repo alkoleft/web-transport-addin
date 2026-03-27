@@ -1,4 +1,3 @@
-
 mod http;
 mod mcp;
 mod ws;
@@ -14,7 +13,9 @@ use addin1c::{create_component, destroy_component, name, AttachType};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub(crate) fn parse_headers(json_headers: String) -> Result<HashMap<String, String>, Box<dyn Error>> {
+pub(crate) fn parse_headers(
+    json_headers: String,
+) -> Result<HashMap<String, String>, Box<dyn Error>> {
     if json_headers.is_empty() {
         return Ok(HashMap::new());
     }

@@ -21,15 +21,15 @@ use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, CancelTaskParams, CancelTaskResult,
-    CustomNotification, CustomRequest, CustomResult, ErrorCode, GetPromptRequestParams,
-    GetPromptResult, GetTaskInfoParams, GetTaskPayloadResult, GetTaskResult, GetTaskResultParams,
-    Implementation, InitializeRequestParams, InitializeResult, ListPromptsResult,
-    ListResourceTemplatesResult, ListResourcesResult, ListTasksResult, ListToolsResult,
-    PaginatedRequestParams, ProgressNotification, ProgressNotificationParam, ProgressToken,
-    ReadResourceRequestParams, ReadResourceResult, ResourceUpdatedNotificationParam,
-    ServerCapabilities, SubscribeRequestParams, Task, TaskRequestsCapability, TaskStatus,
-    TasksCapability, ToolsTaskCapability, UnsubscribeRequestParams,
+    CallToolRequestParams, CallToolResult, CancelTaskParams, CancelTaskResult, CustomNotification,
+    CustomRequest, CustomResult, ErrorCode, GetPromptRequestParams, GetPromptResult,
+    GetTaskInfoParams, GetTaskPayloadResult, GetTaskResult, GetTaskResultParams, Implementation,
+    InitializeRequestParams, InitializeResult, ListPromptsResult, ListResourceTemplatesResult,
+    ListResourcesResult, ListTasksResult, ListToolsResult, PaginatedRequestParams,
+    ProgressNotification, ProgressNotificationParam, ProgressToken, ReadResourceRequestParams,
+    ReadResourceResult, ResourceUpdatedNotificationParam, ServerCapabilities,
+    SubscribeRequestParams, Task, TaskRequestsCapability, TaskStatus, TaskSupport, TasksCapability,
+    ToolsTaskCapability, UnsubscribeRequestParams,
 };
 use rmcp::service::{ClientSink, NotificationContext, RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -85,7 +85,9 @@ impl McpServerState {
         status: TaskStatus,
         message: Option<String>,
     ) -> Result<(), String> {
-        self.handler.update_task_status(task_id, status, message).await
+        self.handler
+            .update_task_status(task_id, status, message)
+            .await
     }
 
     pub(super) async fn notify_task_progress(
@@ -294,8 +296,14 @@ fn start_mcp_server_with_listener(
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let join = runtime.spawn(async move {
         let tokio_listener = match tokio::net::TcpListener::from_std(listener) {
-            Ok(l) => { let _ = ready_tx.send(Ok(())); l }
-            Err(e) => { let _ = ready_tx.send(Err(e.to_string())); return; }
+            Ok(l) => {
+                let _ = ready_tx.send(Ok(()));
+                l
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e.to_string()));
+                return;
+            }
         };
         let server = axum::serve(tokio_listener, app).with_graceful_shutdown(async {
             let _ = shutdown_rx.await;
@@ -420,10 +428,7 @@ async fn maybe_convert_sse_to_json(response: BoxResponse) -> BoxResponse {
         return response;
     }
 
-    let session_id = response
-        .headers()
-        .get("mcp-session-id")
-        .cloned();
+    let session_id = response.headers().get("mcp-session-id").cloned();
 
     let (parts, body) = response.into_parts();
     let bytes = match body.collect().await {
@@ -471,7 +476,11 @@ async fn intercept_orphan_initialized(req: AxumRequest, next: Next) -> Response<
         };
         let is_initialized = serde_json::from_slice::<serde_json::Value>(&bytes)
             .ok()
-            .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(|s| s.to_owned()))
+            .and_then(|v| {
+                v.get("method")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_owned())
+            })
             .map(|m| m == "notifications/initialized")
             .unwrap_or(false);
         if is_initialized {
@@ -553,6 +562,13 @@ struct McpBridgeHandler {
 }
 
 impl McpBridgeHandler {
+    fn tool_requires_task(tool: &rmcp::model::Tool) -> bool {
+        tool.execution
+            .as_ref()
+            .and_then(|execution| execution.task_support)
+            == Some(TaskSupport::Required)
+    }
+
     async fn dispatch_request<T>(
         &self,
         event: &str,
@@ -593,6 +609,76 @@ impl McpBridgeHandler {
         };
 
         parse_mcp_response::<T>(response)
+    }
+
+    async fn wait_for_task_result(
+        &self,
+        task_id: &str,
+        timeout: Duration,
+    ) -> Result<CallToolResult, McpError> {
+        let poll = async {
+            loop {
+                let entry = {
+                    let tasks = self.tasks.lock().await;
+                    tasks.get(task_id).cloned()
+                };
+                let Some(entry) = entry else {
+                    return Err(McpError::internal_error("Task disappeared", None));
+                };
+
+                if let Some(result) = entry.result {
+                    return match result {
+                        Ok(value) => serde_json::from_value::<CallToolResult>(value)
+                            .map_err(|err| McpError::internal_error(err.to_string(), None)),
+                        Err(error) => Err(error),
+                    };
+                }
+
+                if entry.task.status == TaskStatus::Cancelled {
+                    return Err(McpError::internal_error("Task cancelled", None));
+                }
+
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+
+        tokio::time::timeout(timeout, poll)
+            .await
+            .map_err(|_| McpError::internal_error("Handler timeout", None))?
+    }
+
+    async fn call_task_tool_sync_compat(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let task = self.create_task_entry(&request, &context).await?;
+        let task_id = task.task_id.clone();
+        let progress_token = Self::request_progress_token(&request, &context.meta);
+        let args_payload = match request.arguments {
+            Some(map) => serde_json::Value::Object(map),
+            None => serde_json::Value::Null,
+        };
+        let payload = serde_json::json!({
+            "executionMode": "task",
+            "taskId": task_id,
+            "name": request.name,
+            "arguments": args_payload,
+            "progressToken": progress_token,
+        });
+
+        if let Err(err) = self.emit_event("MCP_TOOL_CALL", payload) {
+            let mut tasks = self.tasks.lock().await;
+            tasks.remove(task_id.as_str());
+            return Err(err);
+        }
+
+        let result = self
+            .wait_for_task_result(task_id.as_str(), self.response_timeout)
+            .await;
+        let mut tasks = self.tasks.lock().await;
+        tasks.remove(task_id.as_str());
+        result
     }
 
     fn emit_event(&self, event: &str, payload: serde_json::Value) -> Result<(), McpError> {
@@ -722,10 +808,9 @@ impl McpBridgeHandler {
         if let Some(message) = message {
             params = params.with_message(message);
         }
-        let notification =
-            rmcp::model::ServerNotification::ProgressNotification(ProgressNotification::new(
-                params,
-            ));
+        let notification = rmcp::model::ServerNotification::ProgressNotification(
+            ProgressNotification::new(params),
+        );
         self.broadcast_notification(notification).await;
         Ok(())
     }
@@ -773,8 +858,7 @@ impl McpBridgeHandler {
 }
 
 fn peer_id(peer: &ClientSink) -> Option<usize> {
-    peer.peer_info()
-        .map(|info| info as *const _ as usize)
+    peer.peer_info().map(|info| info as *const _ as usize)
 }
 
 impl ServerHandler for McpBridgeHandler {
@@ -856,7 +940,7 @@ impl ServerHandler for McpBridgeHandler {
         context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
         async move {
-            let _entry = {
+            let entry = {
                 let guard = self
                     .registry
                     .read()
@@ -871,7 +955,7 @@ impl ServerHandler for McpBridgeHandler {
                     Some(map) => serde_json::Value::Object(map),
                     None => serde_json::Value::Object(serde_json::Map::new()),
                 };
-                let errors = _entry
+                let errors = entry
                     .schema
                     .iter_errors(&validation_value)
                     .map(|err| err.to_string())
@@ -885,6 +969,10 @@ impl ServerHandler for McpBridgeHandler {
                     };
                     return Err(McpError::invalid_params(message, None));
                 }
+            }
+
+            if Self::tool_requires_task(&entry.tool) {
+                return self.call_task_tool_sync_compat(request, context).await;
             }
 
             let progress_token = Self::request_progress_token(&request, &context.meta);
@@ -1097,10 +1185,7 @@ impl ServerHandler for McpBridgeHandler {
                 entry.retain(|s| !s.is_transport_closed());
                 entry.push(context.peer.clone());
             }
-            let _ = self.emit_event(
-                "MCP_RESOURCE_SUBSCRIBE",
-                serde_json::json!({ "uri": uri }),
-            );
+            let _ = self.emit_event("MCP_RESOURCE_SUBSCRIBE", serde_json::json!({ "uri": uri }));
             Ok(())
         }
     }
@@ -1215,7 +1300,10 @@ impl ServerHandler for McpBridgeHandler {
         async move {
             let tasks = {
                 let tasks = self.tasks.lock().await;
-                tasks.values().map(|entry| entry.task.clone()).collect::<Vec<_>>()
+                tasks
+                    .values()
+                    .map(|entry| entry.task.clone())
+                    .collect::<Vec<_>>()
             };
             Ok(ListTasksResult::new(tasks))
         }
@@ -1229,7 +1317,9 @@ impl ServerHandler for McpBridgeHandler {
         async move {
             let task = {
                 let tasks = self.tasks.lock().await;
-                tasks.get(request.task_id.as_str()).map(|entry| entry.task.clone())
+                tasks
+                    .get(request.task_id.as_str())
+                    .map(|entry| entry.task.clone())
             }
             .ok_or_else(|| McpError::invalid_params("task not found", None))?;
             Ok(GetTaskResult { meta: None, task })
@@ -1244,7 +1334,9 @@ impl ServerHandler for McpBridgeHandler {
         async move {
             let result = {
                 let tasks = self.tasks.lock().await;
-                tasks.get(request.task_id.as_str()).and_then(|entry| entry.result.clone())
+                tasks
+                    .get(request.task_id.as_str())
+                    .and_then(|entry| entry.result.clone())
             }
             .ok_or_else(|| McpError::invalid_params("task result is not ready", None))?;
             match result {
@@ -1268,10 +1360,7 @@ impl ServerHandler for McpBridgeHandler {
                 entry.task.status = TaskStatus::Cancelled;
                 entry.task.status_message = Some("Task was cancelled".to_owned());
                 entry.task.last_updated_at = chrono::Utc::now().to_rfc3339();
-                entry.result = Some(Err(McpError::invalid_request(
-                    "Task was cancelled",
-                    None,
-                )));
+                entry.result = Some(Err(McpError::invalid_request("Task was cancelled", None)));
                 entry.task.clone()
             };
             let _ = self.emit_event(
@@ -1648,6 +1737,50 @@ mod tests {
         assert_eq!(entry.task.status_message.as_deref(), Some("Need input"));
     }
 
+    #[tokio::test]
+    async fn wait_for_task_result_returns_completed_payload() {
+        let handler = make_test_handler(Registry::default());
+        let task = Task::new(
+            "task-3".to_owned(),
+            TaskStatus::Working,
+            "2026-01-01T00:00:00Z".to_owned(),
+            "2026-01-01T00:00:00Z".to_owned(),
+        );
+        handler
+            .tasks
+            .lock()
+            .await
+            .insert("task-3".to_owned(), TaskEntry::new(task, None));
+
+        let handler_clone = handler.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            handler_clone
+                .complete_task(
+                    "task-3",
+                    McpResponse {
+                        status: 200,
+                        headers: HashMap::new(),
+                        body: r#"{"result":{"content":[{"type":"text","text":"done"}]}}"#
+                            .to_owned(),
+                    },
+                )
+                .await
+                .unwrap();
+        });
+
+        let result = handler
+            .wait_for_task_result("task-3", Duration::from_millis(200))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({
+                "content": [{"type":"text","text":"done"}]
+            })
+        );
+    }
+
     #[test]
     fn request_progress_token_falls_back_to_context_meta() {
         let request = CallToolRequestParams::new("long_job");
@@ -1792,10 +1925,14 @@ mod tests {
         use rmcp::service::ServiceExt;
         use rmcp::transport::StreamableHttpClientTransport;
 
-        async fn connect(base: &str) -> rmcp::service::RunningService<rmcp::service::RoleClient, ()> {
+        async fn connect(
+            base: &str,
+        ) -> rmcp::service::RunningService<rmcp::service::RoleClient, ()> {
             let url = format!("{base}/mcp");
             let transport = StreamableHttpClientTransport::from_uri(url);
-            ().serve(transport).await.expect("rmcp client should connect")
+            ().serve(transport)
+                .await
+                .expect("rmcp client should connect")
         }
 
         #[tokio::test]
@@ -1850,7 +1987,8 @@ mod tests {
             let client = connect(&base).await;
             let params = serde_json::from_value(serde_json::json!({
                 "name": "nonexistent"
-            })).unwrap();
+            }))
+            .unwrap();
             let err = client.call_tool(params).await;
             assert!(err.is_err(), "calling unknown tool should fail");
             client.cancel().await.unwrap();
@@ -1864,7 +2002,8 @@ mod tests {
             let params = serde_json::from_value(serde_json::json!({
                 "name": "greet",
                 "arguments": {}
-            })).unwrap();
+            }))
+            .unwrap();
             let err = client.call_tool(params).await;
             assert!(err.is_err(), "calling tool with invalid args should fail");
             client.cancel().await.unwrap();
@@ -1878,9 +2017,13 @@ mod tests {
             let params = serde_json::from_value(serde_json::json!({
                 "name": "greet",
                 "arguments": { "name": "world" }
-            })).unwrap();
+            }))
+            .unwrap();
             let err = client.call_tool(params).await;
-            assert!(err.is_err(), "calling tool without 1C connection should fail");
+            assert!(
+                err.is_err(),
+                "calling tool without 1C connection should fail"
+            );
             client.cancel().await.unwrap();
         }
 
@@ -1901,7 +2044,8 @@ mod tests {
             let client = connect(&base).await;
             let params = serde_json::from_value(serde_json::json!({
                 "uri": "str://missing"
-            })).unwrap();
+            }))
+            .unwrap();
             let err = client.read_resource(params).await;
             assert!(err.is_err(), "reading missing resource should fail");
             client.cancel().await.unwrap();
@@ -1922,7 +2066,10 @@ mod tests {
             let client = connect(&base).await;
             let result = client.list_resource_templates(None).await.unwrap();
             assert_eq!(result.resource_templates.len(), 1);
-            assert_eq!(result.resource_templates[0].uri_template.as_str(), "str://users/{id}");
+            assert_eq!(
+                result.resource_templates[0].uri_template.as_str(),
+                "str://users/{id}"
+            );
             client.cancel().await.unwrap();
         }
 
@@ -1943,7 +2090,8 @@ mod tests {
             let client = connect(&base).await;
             let params = serde_json::from_value(serde_json::json!({
                 "name": "nonexistent"
-            })).unwrap();
+            }))
+            .unwrap();
             let err = client.get_prompt(params).await;
             assert!(err.is_err(), "getting missing prompt should fail");
             client.cancel().await.unwrap();
