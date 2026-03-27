@@ -229,19 +229,18 @@ pub(super) fn start_mcp_server(
         tasks,
     });
 
+    let mut service_config = StreamableHttpServerConfig::default();
+    service_config.sse_keep_alive = None;
+    service_config.sse_retry = None;
+    service_config.cancellation_token = CancellationToken::new();
+
     let service = StreamableHttpService::new(
         {
             let handler = handler.clone();
             move || Ok(handler.clone())
         },
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig {
-            stateful_mode: true,
-            json_response: false,
-            sse_keep_alive: None,
-            sse_retry: None,
-            cancellation_token: CancellationToken::new(),
-        },
+        service_config,
     );
 
     let service = AllowListLayer { allow_list }.layer(service);
