@@ -7,6 +7,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, Mutex};
 
 use super::server::HttpServerState;
+use crate::addin_error::report_platform_error;
 use crate::VERSION;
 
 pub struct HttpAddIn {
@@ -49,6 +50,9 @@ impl SimpleAddin for HttpAddIn {
         true
     }
     fn save_error(&mut self, err: Option<Box<dyn Error>>) {
+        if let Some(ref error) = err {
+            report_platform_error(self.connection, "WebTransport.HTTP", error.as_ref());
+        }
         self.last_error = err;
     }
     fn methods() -> &'static [MethodInfo<Self>] {

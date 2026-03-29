@@ -1,3 +1,4 @@
+mod addin_error;
 mod http;
 mod mcp;
 mod ws;

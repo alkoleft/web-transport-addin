@@ -6,9 +6,10 @@ use tokio::runtime::Runtime;
 
 use crate::ws_client;
 use crate::ws_client::WebSocketConnection;
-use crate::VERSION;
+use crate::{addin_error::report_platform_error, VERSION};
 
 pub struct WsAddIn {
+    pub(super) connection: Option<&'static addin1c::Connection>,
     pub(super) runtime: Arc<Runtime>,
     pub(super) websocket: Option<WebSocketConnection>,
     last_error: Option<Box<dyn Error>>,
@@ -73,10 +74,14 @@ impl SimpleAddin for WsAddIn {
     fn name() -> &'static CStr1C {
         name!("ws")
     }
-    fn init(&mut self, _interface: &'static addin1c::Connection) -> bool {
+    fn init(&mut self, interface: &'static addin1c::Connection) -> bool {
+        self.connection = Some(interface);
         true
     }
     fn save_error(&mut self, err: Option<Box<dyn Error>>) {
+        if let Some(ref error) = err {
+            report_platform_error(self.connection, "WebTransport.WS", error.as_ref());
+        }
         self.last_error = err;
     }
     fn methods() -> &'static [MethodInfo<Self>] {
@@ -116,6 +121,7 @@ impl SimpleAddin for WsAddIn {
 impl Default for WsAddIn {
     fn default() -> Self {
         Self {
+            connection: None,
             last_error: None,
             websocket: None,
             runtime: Arc::new(Runtime::new().unwrap()),

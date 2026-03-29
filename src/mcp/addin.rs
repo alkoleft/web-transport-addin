@@ -14,7 +14,7 @@ use super::registry::Registry;
 use super::server::{
     parse_allow_list, start_mcp_server, AllowList, McpResponse, McpServerInfo, McpServerState,
 };
-use crate::{parse_headers, VERSION};
+use crate::{addin_error::report_platform_error, parse_headers, VERSION};
 pub struct McpAddIn {
     pub(super) connection: Option<&'static addin1c::Connection>,
     pub(super) runtime: Arc<Runtime>,
@@ -190,11 +190,15 @@ impl McpAddIn {
         };
 
         self.runtime.clone().block_on(async {
-            server
-                .complete_task(task_id.as_str(), response)
-                .await
-                .map_err(|err| -> Box<dyn Error> { err.into() })?;
-            return_value.set_bool(true);
+            match server.complete_task(task_id.as_str(), response).await {
+                Ok(()) => {
+                    return_value.set_bool(true);
+                }
+                Err(err) if is_task_not_found_error(&err) => {
+                    return_value.set_bool(false);
+                }
+                Err(err) => return Err(err.into()),
+            }
             Ok(())
         })
     }
@@ -218,11 +222,18 @@ impl McpAddIn {
         };
 
         self.runtime.clone().block_on(async {
-            server
+            match server
                 .update_task_status(task_id.as_str(), status, message)
                 .await
-                .map_err(|err| -> Box<dyn Error> { err.into() })?;
-            return_value.set_bool(true);
+            {
+                Ok(()) => {
+                    return_value.set_bool(true);
+                }
+                Err(err) if is_task_not_found_error(&err) => {
+                    return_value.set_bool(false);
+                }
+                Err(err) => return Err(err.into()),
+            }
             Ok(())
         })
     }
@@ -251,11 +262,18 @@ impl McpAddIn {
         };
 
         self.runtime.clone().block_on(async {
-            server
+            match server
                 .notify_task_progress(task_id.as_str(), progress, total, message)
                 .await
-                .map_err(|err| -> Box<dyn Error> { err.into() })?;
-            return_value.set_bool(true);
+            {
+                Ok(()) => {
+                    return_value.set_bool(true);
+                }
+                Err(err) if is_task_not_found_error(&err) => {
+                    return_value.set_bool(false);
+                }
+                Err(err) => return Err(err.into()),
+            }
             Ok(())
         })
     }
@@ -547,6 +565,9 @@ impl SimpleAddin for McpAddIn {
         true
     }
     fn save_error(&mut self, err: Option<Box<dyn Error>>) {
+        if let Some(ref error) = err {
+            report_platform_error(self.connection, "WebTransport.MCP", error.as_ref());
+        }
         self.last_error = err;
     }
     fn methods() -> &'static [MethodInfo<Self>] {
@@ -692,6 +713,10 @@ fn parse_json_items(raw: &str) -> Result<Vec<Value>, Box<dyn Error>> {
         Value::Object(_) => Ok(vec![value]),
         _ => Err("Ожидается JSON объект или массив".to_owned().into()),
     }
+}
+
+fn is_task_not_found_error(err: &str) -> bool {
+    err == "Не найдена MCP задача"
 }
 
 fn parse_tool(value: Value) -> Result<rmcp::model::Tool, Box<dyn Error>> {
