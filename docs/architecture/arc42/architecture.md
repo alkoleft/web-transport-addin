@@ -287,7 +287,7 @@ sequenceDiagram
     Client->>Mcp: POST /mcp tools/call
     Mcp->>OneC: Внешнее событие MCP_TOOL_CALL(JSON)
     alt sync
-        OneC->>Mcp: ОтправитьMCPОтвет(id, ...)
+        OneC->>Mcp: ОтправитьОтвет(id, ...)
         Mcp-->>Client: JSON-RPC response
     else public task
         OneC->>Mcp: УстановитьСтатусMCPЗадачи / УведомитьОПрогрессе...

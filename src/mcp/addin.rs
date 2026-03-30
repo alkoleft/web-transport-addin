@@ -579,7 +579,7 @@ impl SimpleAddin for McpAddIn {
                 method: Methods::Method0(Self::mcp_stop),
             },
             MethodInfo {
-                name: name!("ОтправитьMCPОтвет"),
+                name: name!("ОтправитьОтвет"),
                 method: Methods::Method4(Self::mcp_send_response),
             },
             MethodInfo {
