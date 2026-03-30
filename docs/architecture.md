@@ -9,7 +9,7 @@
 ## Архитектурные решения
 
 - [Индекс ADR](decisions/README.md)
-- [ADR-0001: Использовать `text/event-stream` для асинхронных MCP-вызовов инструментов](decisions/0001-use-sse-transport-for-async-mcp-calls.md)
+- [ADR-0002: Отказаться от внутренней эмуляции задач в MCP bridge](decisions/0002-drop-internal-task-emulation-in-mcp-bridge.md)
 
 ## Правила
 

@@ -293,10 +293,6 @@ sequenceDiagram
         OneC->>Mcp: УстановитьСтатусMCPЗадачи / УведомитьОПрогрессе...
         OneC->>Mcp: ЗавершитьMCPЗадачу(taskId, ...)
         Mcp-->>Client: public task lifecycle
-    else internal task over SSE
-        OneC->>Mcp: УстановитьСтатусMCPЗадачи / УведомитьОПрогрессе...
-        OneC->>Mcp: ЗавершитьMCPЗадачу(taskId=internal:..., ...)
-        Mcp-->>Client: SSE completion of original POST
     end
 ```
 
@@ -305,8 +301,8 @@ sequenceDiagram
 1. MCP transport принимает запрос на `/mcp`.
 2. Сервер проверяет allow-list для `Origin` и поддерживаемый режим вызова.
 3. Для `tools/call` генерируется событие `MCP_TOOL_CALL`.
-4. Для `taskSupport = "forbidden"` вызов обрабатывается синхронно, для `taskSupport = "optional"` обычный `tools/call` переводится во внутреннюю задачу, а для `taskSupport = "required"` допускается только клиентский task flow.
-5. Со стороны 1С любой асинхронный сценарий завершается через task lifecycle, а transport `text/event-stream` остаётся деталью реализации компоненты.
+4. Для `taskSupport = "forbidden"` вызов обрабатывается синхронно, для `taskSupport = "optional"` клиент сам выбирает между plain `tools/call` и `tasks/*`, а для `taskSupport = "required"` допускается только клиентский task flow.
+5. Со стороны 1С task lifecycle используется только для публичных MCP-задач, а transport `text/event-stream` остаётся деталью реализации Streamable HTTP.
 
 ---
 
@@ -376,8 +372,7 @@ graph TB
 ### 8.3 Корреляция запросов и ответов
 
 - Для HTTP и MCP синхронные ответы сопоставляются через строковые идентификаторы и in-memory maps.
-- Для SSE и MCP task-based операций используются отдельные идентификаторы сессий/задач.
-- Внутренние MCP-задачи для SSE bridge используют специальный префикс `internal:`.
+- Для SSE и MCP task-based операций используются отдельные идентификаторы сессий/публичных задач.
 - Потерянные или просроченные ответы удаляются из карт ожидания.
 
 ### 8.4 Управление доступом
@@ -411,11 +406,11 @@ graph TB
 | Использовать `axum` + `tokio` для HTTP/MCP части | Даёт единый async стек для серверных сценариев | Реализовано |
 | Реализовать MCP через `rmcp` Streamable HTTP transport | Снижает объём собственной протокольной логики | Реализовано |
 | Хранить runtime state in-memory | Достаточно для embed-сценария внешней компоненты без отдельного persistence слоя | Реализовано |
-| Использовать `text/event-stream` для асинхронных MCP tool calls и разделять public/internal tasks | Упрощает bridge с 1С и фиксирует семантику `taskSupport` | Реализовано через ADR-0001 |
+| Отказаться от внутренней эмуляции задач и оставить только стандартные MCP execution paths | Упрощает bridge с 1С и убирает component-specific semantics поверх MCP | Реализовано через ADR-0002 |
 
 Связанные ADR:
 
-- [ADR-0001: Использовать `text/event-stream` для асинхронных MCP-вызовов инструментов](/home/alko/develop/open-source/websocket1c/docs/decisions/0001-use-sse-transport-for-async-mcp-calls.md)
+- [ADR-0002: Отказаться от внутренней эмуляции задач в MCP bridge](/home/alko/develop/open-source/websocket1c/docs/decisions/0002-drop-internal-task-emulation-in-mcp-bridge.md)
 
 ---
 

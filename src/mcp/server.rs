@@ -154,98 +154,22 @@ pub(super) struct McpResponse {
     pub(super) body: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResponseMode {
-    SyncJson,
-    StreamSse,
-    Task,
-}
-
-impl ResponseMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            ResponseMode::SyncJson => "sync_json",
-            ResponseMode::StreamSse => "stream_sse",
-            ResponseMode::Task => "task",
-        }
-    }
-}
-
-const INTERNAL_TASK_PREFIX: &str = "internal:";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TaskVisibility {
-    Public,
-    Internal,
-}
-
-impl TaskVisibility {
-    fn as_str(self) -> &'static str {
-        match self {
-            TaskVisibility::Public => "public",
-            TaskVisibility::Internal => "internal",
-        }
-    }
-
-    fn format_task_id(self, sequence: u64) -> String {
-        match self {
-            TaskVisibility::Public => sequence.to_string(),
-            TaskVisibility::Internal => format!("{INTERNAL_TASK_PREFIX}{sequence}"),
-        }
-    }
-}
-
-#[derive(Clone)]
-enum TaskKind {
-    Public,
-    InternalSse {
-        sink: ClientSink,
-        completion: InternalTaskCompletionTx,
-    },
-}
-
-impl TaskKind {
-    fn visibility(&self) -> TaskVisibility {
-        match self {
-            TaskKind::Public => TaskVisibility::Public,
-            TaskKind::InternalSse { .. } => TaskVisibility::Internal,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(super) struct TaskEntry {
     task: Task,
     result: Option<Result<serde_json::Value, McpError>>,
     progress_token: Option<ProgressToken>,
-    kind: TaskKind,
 }
 
 impl TaskEntry {
-    fn new(task: Task, progress_token: Option<ProgressToken>, kind: TaskKind) -> Self {
+    fn new(task: Task, progress_token: Option<ProgressToken>) -> Self {
         Self {
             task,
             result: None,
             progress_token,
-            kind,
         }
     }
-
-    fn is_public(&self) -> bool {
-        self.kind.visibility() == TaskVisibility::Public
-    }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InvocationPlan {
-    Sync,
-    InternalTask,
-    PublicTask,
-}
-
-type InternalTaskCompletion = Result<serde_json::Value, McpError>;
-type InternalTaskCompletionTx = Arc<Mutex<Option<oneshot::Sender<InternalTaskCompletion>>>>;
-type InternalTaskCompletionRx = oneshot::Receiver<InternalTaskCompletion>;
 
 struct PreparedToolCall {
     task_support: TaskSupport,
@@ -601,44 +525,6 @@ impl McpBridgeHandler {
             .unwrap_or(TaskSupport::Forbidden)
     }
 
-    fn request_response_mode(request: &CallToolRequestParams) -> Result<ResponseMode, McpError> {
-        let raw = request
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("responseMode"))
-            .and_then(|value| value.as_str());
-        match raw {
-            None => Ok(ResponseMode::SyncJson),
-            Some("sync_json") => Ok(ResponseMode::SyncJson),
-            Some("stream_sse") => Ok(ResponseMode::StreamSse),
-            Some("task") => Ok(ResponseMode::Task),
-            Some(_) => Err(McpError::invalid_params("Unsupported responseMode", None)),
-        }
-    }
-
-    fn invocation_plan(
-        task_support: TaskSupport,
-        response_mode: ResponseMode,
-    ) -> Result<InvocationPlan, McpError> {
-        match (task_support, response_mode) {
-            (TaskSupport::Forbidden, ResponseMode::SyncJson) => Ok(InvocationPlan::Sync),
-            (TaskSupport::Forbidden, ResponseMode::StreamSse)
-            | (TaskSupport::Forbidden, ResponseMode::Task) => Err(McpError::invalid_params(
-                "Tool does not support streaming or task-based invocation",
-                None,
-            )),
-            (TaskSupport::Optional, ResponseMode::SyncJson | ResponseMode::StreamSse) => {
-                Ok(InvocationPlan::InternalTask)
-            }
-            (TaskSupport::Optional | TaskSupport::Required, ResponseMode::Task) => {
-                Ok(InvocationPlan::PublicTask)
-            }
-            (TaskSupport::Required, ResponseMode::SyncJson | ResponseMode::StreamSse) => Err(
-                McpError::invalid_params("Tool requires task-based invocation", None),
-            ),
-        }
-    }
-
     fn arguments_payload(
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> serde_json::Value {
@@ -700,46 +586,36 @@ impl McpBridgeHandler {
     fn build_tool_call_payload(
         name: &str,
         arguments: serde_json::Value,
-        response_mode: ResponseMode,
         progress_token: Option<serde_json::Value>,
-        task: Option<(&str, TaskVisibility)>,
+        task_id: Option<&str>,
     ) -> serde_json::Value {
         let mut payload = serde_json::Map::new();
         payload.insert(
             "executionMode".to_owned(),
-            serde_json::Value::String(if task.is_some() { "task" } else { "sync" }.to_owned()),
-        );
-        payload.insert(
-            "responseMode".to_owned(),
-            serde_json::Value::String(response_mode.as_str().to_owned()),
+            serde_json::Value::String(if task_id.is_some() { "task" } else { "sync" }.to_owned()),
         );
         payload.insert(
             "name".to_owned(),
             serde_json::Value::String(name.to_owned()),
         );
         payload.insert("arguments".to_owned(), arguments);
-        payload.insert(
-            "progressToken".to_owned(),
-            progress_token.unwrap_or(serde_json::Value::Null),
-        );
-
-        if let Some((task_id, visibility)) = task {
+        if let Some(progress_token) = progress_token {
+            payload.insert("progressToken".to_owned(), progress_token);
+        }
+        if let Some(task_id) = task_id {
             payload.insert(
                 "taskId".to_owned(),
                 serde_json::Value::String(task_id.to_owned()),
-            );
-            payload.insert(
-                "taskVisibility".to_owned(),
-                serde_json::Value::String(visibility.as_str().to_owned()),
             );
         }
 
         serde_json::Value::Object(payload)
     }
 
-    fn next_task_id(&self, visibility: TaskVisibility) -> String {
-        let sequence = self.request_counter.fetch_add(1, Ordering::Relaxed);
-        visibility.format_task_id(sequence)
+    fn next_task_id(&self) -> String {
+        self.request_counter
+            .fetch_add(1, Ordering::Relaxed)
+            .to_string()
     }
 
     async fn dispatch_request<T>(
@@ -784,65 +660,6 @@ impl McpBridgeHandler {
         parse_mcp_response::<T>(response)
     }
 
-    async fn wait_for_task_result(
-        &self,
-        completion_rx: InternalTaskCompletionRx,
-        timeout: Duration,
-    ) -> Result<CallToolResult, McpError> {
-        let result = tokio::time::timeout(timeout, completion_rx)
-            .await
-            .map_err(|_| McpError::internal_error("Handler timeout", None))?
-            .map_err(|_| McpError::internal_error("Task completion channel closed", None))??;
-
-        serde_json::from_value::<CallToolResult>(result)
-            .map_err(|err| McpError::internal_error(err.to_string(), None))
-    }
-
-    async fn call_internal_task_tool(
-        &self,
-        request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
-        arguments: serde_json::Value,
-    ) -> Result<CallToolResult, McpError> {
-        let (completion_tx, completion_rx) = oneshot::channel();
-        let visibility = TaskVisibility::Internal;
-        let task = self
-            .create_task_entry(
-                &request,
-                &context,
-                TaskKind::InternalSse {
-                    sink: context.peer.clone(),
-                    completion: Arc::new(Mutex::new(Some(completion_tx))),
-                },
-            )
-            .await?;
-        let task_id = task.task_id.clone();
-        let progress_token = self
-            .task_progress_token(task_id.as_str())
-            .await
-            .map(progress_token_to_json);
-        let payload = Self::build_tool_call_payload(
-            request.name.as_ref(),
-            arguments,
-            ResponseMode::StreamSse,
-            progress_token,
-            Some((task_id.as_str(), visibility)),
-        );
-
-        if let Err(err) = self.emit_event("MCP_TOOL_CALL", payload) {
-            let mut tasks = self.tasks.lock().await;
-            tasks.remove(task_id.as_str());
-            return Err(err);
-        }
-
-        let result = self
-            .wait_for_task_result(completion_rx, self.response_timeout)
-            .await;
-        let mut tasks = self.tasks.lock().await;
-        tasks.remove(task_id.as_str());
-        result
-    }
-
     fn emit_event(&self, event: &str, payload: serde_json::Value) -> Result<(), McpError> {
         let Some(connection) = self.connection else {
             return Err(McpError::internal_error(
@@ -884,10 +701,8 @@ impl McpBridgeHandler {
         &self,
         request: &CallToolRequestParams,
         context: &RequestContext<RoleServer>,
-        kind: TaskKind,
     ) -> Result<Task, McpError> {
-        let visibility = kind.visibility();
-        let task_id = self.next_task_id(visibility);
+        let task_id = self.next_task_id();
         let timestamp = chrono::Utc::now().to_rfc3339();
         let task = Task::new(
             task_id.clone(),
@@ -904,7 +719,7 @@ impl McpBridgeHandler {
         });
 
         let mut tasks = self.tasks.lock().await;
-        tasks.insert(task_id, TaskEntry::new(task.clone(), progress_token, kind));
+        tasks.insert(task_id, TaskEntry::new(task.clone(), progress_token));
         Ok(task)
     }
 
@@ -933,34 +748,21 @@ impl McpBridgeHandler {
 
     async fn complete_task(&self, task_id: &str, response: McpResponse) -> Result<(), String> {
         let parsed = parse_mcp_response::<serde_json::Value>(response);
-        let completion = {
-            let mut tasks = self.tasks.lock().await;
-            let entry = tasks
-                .get_mut(task_id)
-                .ok_or_else(|| "Не найдена MCP задача".to_owned())?;
-            entry.task.last_updated_at = chrono::Utc::now().to_rfc3339();
-            match parsed.clone() {
-                Ok(result) => {
-                    entry.task.status = TaskStatus::Completed;
-                    entry.task.status_message = Some("Task completed".to_owned());
-                    entry.result = Some(Ok(result));
-                }
-                Err(error) => {
-                    entry.task.status = TaskStatus::Failed;
-                    entry.task.status_message = Some(error.message.to_string());
-                    entry.result = Some(Err(error));
-                }
+        let mut tasks = self.tasks.lock().await;
+        let entry = tasks
+            .get_mut(task_id)
+            .ok_or_else(|| "Не найдена MCP задача".to_owned())?;
+        entry.task.last_updated_at = chrono::Utc::now().to_rfc3339();
+        match parsed {
+            Ok(result) => {
+                entry.task.status = TaskStatus::Completed;
+                entry.task.status_message = Some("Task completed".to_owned());
+                entry.result = Some(Ok(result));
             }
-
-            match &entry.kind {
-                TaskKind::Public => None,
-                TaskKind::InternalSse { completion, .. } => Some(completion.clone()),
-            }
-        };
-
-        if let Some(completion) = completion {
-            if let Some(sender) = completion.lock().await.take() {
-                let _ = sender.send(parsed);
+            Err(error) => {
+                entry.task.status = TaskStatus::Failed;
+                entry.task.status_message = Some(error.message.to_string());
+                entry.result = Some(Err(error));
             }
         }
         Ok(())
@@ -973,7 +775,7 @@ impl McpBridgeHandler {
         total: Option<f64>,
         message: Option<String>,
     ) -> Result<(), String> {
-        let (progress_token, kind) = {
+        let progress_token = {
             let mut tasks = self.tasks.lock().await;
             let entry = tasks
                 .get_mut(task_id)
@@ -982,7 +784,7 @@ impl McpBridgeHandler {
             if let Some(message) = message.as_ref() {
                 entry.task.status_message = Some(message.clone());
             }
-            (entry.progress_token.clone(), entry.kind.clone())
+            entry.progress_token.clone()
         };
         let progress_token =
             progress_token.ok_or_else(|| "Для MCP задачи не задан progressToken".to_owned())?;
@@ -994,15 +796,10 @@ impl McpBridgeHandler {
         if let Some(message) = message {
             params = params.with_message(message);
         }
-        let notification = rmcp::model::ServerNotification::ProgressNotification(
+        self.broadcast_notification(rmcp::model::ServerNotification::ProgressNotification(
             ProgressNotification::new(params),
-        );
-        match kind {
-            TaskKind::Public => self.broadcast_notification(notification).await,
-            TaskKind::InternalSse { sink, .. } => {
-                let _ = sink.send_notification(notification).await;
-            }
-        }
+        ))
+        .await;
         Ok(())
     }
 }
@@ -1151,30 +948,23 @@ impl ServerHandler for McpBridgeHandler {
     ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
         async move {
             let prepared = self.prepare_tool_call(&request)?;
-            let response_mode = Self::request_response_mode(&request)?;
-            match Self::invocation_plan(prepared.task_support, response_mode)? {
-                InvocationPlan::Sync => {
-                    let progress_token = Self::request_progress_token(&request, &context.meta)
-                        .map(progress_token_to_json);
-                    let payload = Self::build_tool_call_payload(
-                        request.name.as_ref(),
-                        prepared.arguments,
-                        ResponseMode::SyncJson,
-                        progress_token,
-                        None,
-                    );
-
-                    self.dispatch_request("MCP_TOOL_CALL", payload).await
-                }
-                InvocationPlan::InternalTask => {
-                    self.call_internal_task_tool(request, context, prepared.arguments)
-                        .await
-                }
-                InvocationPlan::PublicTask => Err(McpError::invalid_params(
-                    "Use task-augmented tools/call for responseMode=task",
+            if matches!(prepared.task_support, TaskSupport::Required) {
+                return Err(McpError::invalid_params(
+                    "Tool requires task-based invocation",
                     None,
-                )),
+                ));
             }
+
+            let progress_token =
+                Self::request_progress_token(&request, &context.meta).map(progress_token_to_json);
+            let payload = Self::build_tool_call_payload(
+                request.name.as_ref(),
+                prepared.arguments,
+                progress_token,
+                None,
+            );
+
+            self.dispatch_request("MCP_TOOL_CALL", payload).await
         }
     }
 
@@ -1186,19 +976,14 @@ impl ServerHandler for McpBridgeHandler {
     {
         async move {
             let prepared = self.prepare_tool_call(&request)?;
-            match Self::invocation_plan(prepared.task_support, ResponseMode::Task)? {
-                InvocationPlan::PublicTask => {}
-                InvocationPlan::Sync | InvocationPlan::InternalTask => {
-                    return Err(McpError::internal_error(
-                        "Task response mode resolved to a non-task invocation plan",
-                        None,
-                    ));
-                }
+            if matches!(prepared.task_support, TaskSupport::Forbidden) {
+                return Err(McpError::invalid_params(
+                    "Tool does not support task-based invocation",
+                    None,
+                ));
             }
 
-            let task = self
-                .create_task_entry(&request, &context, TaskKind::Public)
-                .await?;
+            let task = self.create_task_entry(&request, &context).await?;
             let progress_token = self
                 .task_progress_token(task.task_id.as_str())
                 .await
@@ -1206,11 +991,14 @@ impl ServerHandler for McpBridgeHandler {
             let payload = Self::build_tool_call_payload(
                 request.name.as_ref(),
                 prepared.arguments,
-                ResponseMode::Task,
                 progress_token,
-                Some((task.task_id.as_str(), TaskVisibility::Public)),
+                Some(task.task_id.as_str()),
             );
-            self.emit_event("MCP_TOOL_CALL", payload)?;
+            if let Err(err) = self.emit_event("MCP_TOOL_CALL", payload) {
+                let mut tasks = self.tasks.lock().await;
+                tasks.remove(task.task_id.as_str());
+                return Err(err);
+            }
             Ok(rmcp::model::CreateTaskResult::new(task))
         }
     }
@@ -1464,7 +1252,6 @@ impl ServerHandler for McpBridgeHandler {
                 let tasks = self.tasks.lock().await;
                 tasks
                     .values()
-                    .filter(|entry| entry.is_public())
                     .map(|entry| entry.task.clone())
                     .collect::<Vec<_>>()
             };
@@ -1482,7 +1269,6 @@ impl ServerHandler for McpBridgeHandler {
                 let tasks = self.tasks.lock().await;
                 tasks
                     .get(request.task_id.as_str())
-                    .filter(|entry| entry.is_public())
                     .map(|entry| entry.task.clone())
             }
             .ok_or_else(|| McpError::invalid_params("task not found", None))?;
@@ -1500,7 +1286,6 @@ impl ServerHandler for McpBridgeHandler {
                 let tasks = self.tasks.lock().await;
                 tasks
                     .get(request.task_id.as_str())
-                    .filter(|entry| entry.is_public())
                     .and_then(|entry| entry.result.clone())
             }
             .ok_or_else(|| McpError::invalid_params("task result is not ready", None))?;
@@ -1521,7 +1306,6 @@ impl ServerHandler for McpBridgeHandler {
                 let mut tasks = self.tasks.lock().await;
                 let entry = tasks
                     .get_mut(request.task_id.as_str())
-                    .filter(|entry| entry.is_public())
                     .ok_or_else(|| McpError::invalid_params("task not found", None))?;
                 entry.task.status = TaskStatus::Cancelled;
                 entry.task.status_message = Some("Task was cancelled".to_owned());
@@ -1873,10 +1657,11 @@ mod tests {
             "2026-01-01T00:00:00Z".to_owned(),
             "2026-01-01T00:00:00Z".to_owned(),
         );
-        handler.tasks.lock().await.insert(
-            "task-1".to_owned(),
-            TaskEntry::new(task, None, TaskKind::Public),
-        );
+        handler
+            .tasks
+            .lock()
+            .await
+            .insert("task-1".to_owned(), TaskEntry::new(task, None));
 
         handler
             .complete_task(
@@ -1909,10 +1694,11 @@ mod tests {
             "2026-01-01T00:00:00Z".to_owned(),
             "2026-01-01T00:00:00Z".to_owned(),
         );
-        handler.tasks.lock().await.insert(
-            "task-2".to_owned(),
-            TaskEntry::new(task, None, TaskKind::Public),
-        );
+        handler
+            .tasks
+            .lock()
+            .await
+            .insert("task-2".to_owned(), TaskEntry::new(task, None));
 
         handler
             .update_task_status(
@@ -1927,30 +1713,6 @@ mod tests {
         let entry = tasks.get("task-2").unwrap();
         assert_eq!(entry.task.status, TaskStatus::InputRequired);
         assert_eq!(entry.task.status_message.as_deref(), Some("Need input"));
-    }
-
-    #[tokio::test]
-    async fn wait_for_task_result_returns_completed_payload() {
-        let handler = make_test_handler(Registry::default());
-        let (completion_tx, completion_rx) = oneshot::channel();
-
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            let _ = completion_tx.send(Ok(serde_json::json!({
-                "content": [{"type":"text","text":"done"}]
-            })));
-        });
-
-        let result = handler
-            .wait_for_task_result(completion_rx, Duration::from_millis(200))
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::to_value(result).unwrap(),
-            serde_json::json!({
-                "content": [{"type":"text","text":"done"}]
-            })
-        );
     }
 
     #[test]
@@ -1987,72 +1749,51 @@ mod tests {
     }
 
     #[test]
-    fn request_response_mode_defaults_to_sync_json() {
-        let request = CallToolRequestParams::new("echo");
+    fn build_tool_call_payload_for_sync_omits_task_fields() {
+        let payload = McpBridgeHandler::build_tool_call_payload(
+            "echo",
+            serde_json::json!({ "text": "hello" }),
+            None,
+            None,
+        );
+
         assert_eq!(
-            McpBridgeHandler::request_response_mode(&request).unwrap(),
-            ResponseMode::SyncJson
+            payload,
+            serde_json::json!({
+                "executionMode": "sync",
+                "name": "echo",
+                "arguments": { "text": "hello" }
+            })
         );
     }
 
     #[test]
-    fn request_response_mode_rejects_unknown_values() {
-        let request: CallToolRequestParams = serde_json::from_value(serde_json::json!({
-            "name": "echo",
-            "_meta": {
-                "responseMode": "unknown_mode"
-            }
-        }))
-        .unwrap();
-        let error = McpBridgeHandler::request_response_mode(&request).unwrap_err();
-        assert!(error.message.contains("Unsupported responseMode"));
-    }
+    fn build_tool_call_payload_for_task_includes_task_fields() {
+        let payload = McpBridgeHandler::build_tool_call_payload(
+            "long_job",
+            serde_json::json!({}),
+            Some(serde_json::json!(7)),
+            Some("42"),
+        );
 
-    #[test]
-    fn invocation_plan_matches_adr_0001() {
         assert_eq!(
-            McpBridgeHandler::invocation_plan(TaskSupport::Forbidden, ResponseMode::SyncJson,)
-                .unwrap(),
-            InvocationPlan::Sync
-        );
-        assert_eq!(
-            McpBridgeHandler::invocation_plan(TaskSupport::Optional, ResponseMode::SyncJson,)
-                .unwrap(),
-            InvocationPlan::InternalTask
-        );
-        assert_eq!(
-            McpBridgeHandler::invocation_plan(TaskSupport::Optional, ResponseMode::StreamSse,)
-                .unwrap(),
-            InvocationPlan::InternalTask
-        );
-        assert_eq!(
-            McpBridgeHandler::invocation_plan(TaskSupport::Optional, ResponseMode::Task).unwrap(),
-            InvocationPlan::PublicTask
-        );
-        assert_eq!(
-            McpBridgeHandler::invocation_plan(TaskSupport::Required, ResponseMode::Task).unwrap(),
-            InvocationPlan::PublicTask
-        );
-        assert!(
-            McpBridgeHandler::invocation_plan(TaskSupport::Required, ResponseMode::SyncJson,)
-                .is_err()
-        );
-        assert!(
-            McpBridgeHandler::invocation_plan(TaskSupport::Required, ResponseMode::StreamSse,)
-                .is_err()
-        );
-        assert!(
-            McpBridgeHandler::invocation_plan(TaskSupport::Forbidden, ResponseMode::Task,).is_err()
+            payload,
+            serde_json::json!({
+                "executionMode": "task",
+                "name": "long_job",
+                "arguments": {},
+                "progressToken": 7,
+                "taskId": "42"
+            })
         );
     }
 
     #[test]
-    fn task_visibility_formats_internal_ids_with_prefix() {
-        assert_eq!(TaskVisibility::Public.format_task_id(42), "42");
-        assert_eq!(
-            TaskVisibility::Internal.format_task_id(42),
-            format!("{INTERNAL_TASK_PREFIX}42")
-        );
+    fn next_task_id_uses_plain_numeric_sequence() {
+        let handler = make_test_handler(Registry::default());
+
+        assert_eq!(handler.next_task_id(), "1");
+        assert_eq!(handler.next_task_id(), "2");
     }
 
     // ── normalize_protocol_version ───────────────────────────────────────────
@@ -2332,7 +2073,7 @@ mod tests {
             let err = client.call_tool(params).await;
             assert!(
                 err.is_err(),
-                "plain optional-task call should reach internal async path and fail only because 1C connection is absent"
+                "plain optional-task call should use the standard sync path and fail only because 1C connection is absent"
             );
             client.cancel().await.unwrap();
         }
