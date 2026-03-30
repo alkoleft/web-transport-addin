@@ -1,6 +1,6 @@
 # ADR-0001: Использовать `text/event-stream` для асинхронных MCP-вызовов инструментов
 
-- Статус: accepted
+- Статус: superseded by [ADR-0002](/home/alko/develop/open-source/websocket1c/docs/decisions/0002-drop-internal-task-emulation-in-mcp-bridge.md)
 - Дата: 2026-03-30
 - Приняли решение: maintainer, architecture owner
 - Теги: mcp, sse, tasks, transport

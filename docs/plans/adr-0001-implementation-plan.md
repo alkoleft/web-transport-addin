@@ -1,5 +1,10 @@
 # План реализации ADR-0001
 
+> Примечание: этот план относится к superseded-решению из
+> [ADR-0001](/home/alko/develop/open-source/websocket1c/docs/decisions/0001-use-sse-transport-for-async-mcp-calls.md).
+> Актуальное направление зафиксировано в
+> [ADR-0002](/home/alko/develop/open-source/websocket1c/docs/decisions/0002-drop-internal-task-emulation-in-mcp-bridge.md).
+
 ## Назначение
 
 Этот документ детализирует внедрение решения из [ADR-0001](/home/alko/develop/open-source/websocket1c/docs/decisions/0001-use-sse-transport-for-async-mcp-calls.md):
