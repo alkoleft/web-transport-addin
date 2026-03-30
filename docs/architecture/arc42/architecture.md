@@ -290,8 +290,8 @@ sequenceDiagram
         OneC->>Mcp: ОтправитьОтвет(id, ...)
         Mcp-->>Client: JSON-RPC response
     else public task
-        OneC->>Mcp: УстановитьСтатусMCPЗадачи / УведомитьОПрогрессе...
-        OneC->>Mcp: ЗавершитьMCPЗадачу(taskId, ...)
+        OneC->>Mcp: УстановитьСтатусЗадачи / УведомитьОПрогрессе...
+        OneC->>Mcp: ЗавершитьЗадачу(taskId, ...)
         Mcp-->>Client: public task lifecycle
     end
 ```

@@ -571,11 +571,11 @@ impl SimpleAddin for McpAddIn {
     fn methods() -> &'static [MethodInfo<Self>] {
         &[
             MethodInfo {
-                name: name!("ЗапуститьMCP"),
+                name: name!("Запустить"),
                 method: Methods::Method3(Self::mcp_start),
             },
             MethodInfo {
-                name: name!("ОстановитьMCP"),
+                name: name!("Остановить"),
                 method: Methods::Method0(Self::mcp_stop),
             },
             MethodInfo {
@@ -583,15 +583,15 @@ impl SimpleAddin for McpAddIn {
                 method: Methods::Method4(Self::mcp_send_response),
             },
             MethodInfo {
-                name: name!("ЗавершитьMCPЗадачу"),
+                name: name!("ЗавершитьЗадачу"),
                 method: Methods::Method4(Self::mcp_complete_task),
             },
             MethodInfo {
-                name: name!("УстановитьСтатусMCPЗадачи"),
+                name: name!("УстановитьСтатусЗадачи"),
                 method: Methods::Method3(Self::mcp_set_task_status),
             },
             MethodInfo {
-                name: name!("УведомитьОПрогрессеMCPЗадачи"),
+                name: name!("УведомитьОПрогрессеЗадачи"),
                 method: Methods::Method4(Self::mcp_notify_task_progress),
             },
             MethodInfo {

@@ -2,15 +2,15 @@
 <Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:app="http://v8.1c.ru/8.2/managed-application/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:dcscor="http://v8.1c.ru/8.1/data-composition-system/core" xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema" xmlns:dcsset="http://v8.1c.ru/8.1/data-composition-system/settings" xmlns:ent="http://v8.1c.ru/8.1/data/enterprise" xmlns:lf="http://v8.1c.ru/8.2/managed-application/logform" xmlns:pal="http://v8.1c.ru/8.1/data/ui/colors/palette" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.21">
 	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1">
 		<ChildItems>
-			<Button name="ФормаЗапуститьMCPСервер" id="5">
+			<Button name="ФормаЗапуститьСервер" id="5">
 				<Type>CommandBarButton</Type>
-				<CommandName>Form.Command.ЗапуститьMCPСервер</CommandName>
-				<ExtendedTooltip name="ФормаЗапуститьMCPСерверРасширеннаяПодсказка" id="6"/>
+				<CommandName>Form.Command.ЗапуститьСервер</CommandName>
+				<ExtendedTooltip name="ФормаЗапуститьСерверРасширеннаяПодсказка" id="6"/>
 			</Button>
-			<Button name="ФормаОстановитьMCP" id="7">
+			<Button name="ФормаОстановитьСервер" id="7">
 				<Type>CommandBarButton</Type>
-				<CommandName>Form.Command.ОстановитьMCP</CommandName>
-				<ExtendedTooltip name="ФормаОстановитьMCPРасширеннаяПодсказка" id="8"/>
+				<CommandName>Form.Command.ОстановитьСервер</CommandName>
+				<ExtendedTooltip name="ФормаОстановитьСерверРасширеннаяПодсказка" id="8"/>
 			</Button>
 			<Button name="ФормаУведомитьИнструменты" id="20">
 				<Type>CommandBarButton</Type>
@@ -70,23 +70,23 @@
 		</Attribute>
 	</Attributes>
 	<Commands>
-		<Command name="ЗапуститьMCPСервер" id="3">
+		<Command name="ЗапуститьСервер" id="3">
 			<Title>
 				<v8:item>
 					<v8:lang>ru</v8:lang>
-					<v8:content>Запустить MCP</v8:content>
+					<v8:content>Запустить сервер</v8:content>
 				</v8:item>
 			</Title>
-			<Action>ЗапуститьMCPСервер</Action>
+			<Action>ЗапуститьСервер</Action>
 		</Command>
-		<Command name="ОстановитьMCP" id="4">
+		<Command name="ОстановитьСервер" id="4">
 			<Title>
 				<v8:item>
 					<v8:lang>ru</v8:lang>
-					<v8:content>Остановить MCP</v8:content>
+					<v8:content>Остановить сервер</v8:content>
 				</v8:item>
 			</Title>
-			<Action>ОстановитьMCP</Action>
+			<Action>ОстановитьСервер</Action>
 		</Command>
 		<Command name="MCP_УведомитьОбИзмененииИнструментов" id="10">
 			<Title>
