@@ -139,10 +139,9 @@ impl McpAddIn {
         let json_headers = json_headers.get_string()?;
         let body = body.get_string()?;
 
-        let headers = parse_headers(json_headers)?;
+        let _ = parse_headers(json_headers)?;
         let response = McpResponse {
             status: status_code as u16,
-            headers,
             body,
         };
 
@@ -178,10 +177,9 @@ impl McpAddIn {
         }
         let json_headers = json_headers.get_string()?;
         let body = body.get_string()?;
-        let headers = parse_headers(json_headers)?;
+        let _ = parse_headers(json_headers)?;
         let response = McpResponse {
             status: status_code as u16,
-            headers,
             body,
         };
 
