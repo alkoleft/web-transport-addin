@@ -2,7 +2,7 @@
 
 **Проект:** WebTransport 1C Addin  
 **Версия:** 0.6.1  
-**Дата:** 2026-03-29  
+**Дата:** 2026-03-30  
 **Статус:** Draft
 
 ---
@@ -38,7 +38,7 @@
 | 1 | Совместимость с 1С | Разработчик 1С подключает один bundle и получает классы `ws`, `http`, `mcp` через `Новый("AddIn.*")` без отдельного демона или IPC слоя. |
 | 2 | Предсказуемость интеграции | Ошибки методов возвращаются как исключения/`ОписаниеОшибки`, а входящие запросы и события имеют стабильный JSON-формат. |
 | 3 | Поддержка длительных и потоковых сценариев | HTTP/SSE и MCP task-based вызовы работают без блокировки UI-логики 1С дольше одного синхронного вызова. |
-| 4 | Портируемость поставки | Сборка формирует артефакты для Windows/Linux и x86/x64 в одном ZIP-пакете с `Manifest.xml`. |
+| 4 | Портируемость поставки | Сборка формирует bundle для Windows/Linux и x86/x64 с версией в имени: `WebTransportAddIn-{version}.zip` и `Manifest.xml`, который ссылается на DLL/SO с той же версией. |
 | 5 | Расширяемость | MCP-слой позволяет регистрировать инструменты, ресурсы, шаблоны ресурсов и промпты без изменения транспортного ядра. |
 
 ### 1.3 Заинтересованные стороны
@@ -117,7 +117,7 @@ graph TD
 | WebSocket client | Исходящие подключения к внешним WS-серверам | WebSocket |
 | HTTP server | Приём HTTP-запросов и SSE-сессий | HTTP/1.1, SSE, JSON, plain text |
 | MCP server | Публикация MCP Streamable HTTP endpoint | HTTP, SSE, JSON-RPC, MCP |
-| Build/release pipeline | Сборка бинарников и ZIP-пакета | Cargo, cargo-make, shell scripts |
+| Build/release pipeline | Сборка бинарников, генерация `Manifest.xml` и ZIP-пакета | Cargo, cargo-make, shell scripts |
 
 Граница ответственности:
 
@@ -134,7 +134,7 @@ graph TD
 | Предсказуемость интеграции | Все transport-модули скрывают асинхронность за синхронными методами add-in и внешними событиями | Модель взаимодействия остаётся естественной для кода 1С |
 | Длительные сценарии | Tokio runtime создаётся внутри каждого add-in и обслуживает async IO, SSE и MCP tasks | Позволяет совмещать синхронный API 1С и неблокирующие сетевые операции |
 | Расширяемость MCP | Отдельный реестр `Registry` и явные методы регистрации инструментов/ресурсов/промптов | Новые MCP сущности добавляются без изменения HTTP transport слоя |
-| Портируемость поставки | Release pipeline собирает DLL/SO для 4 целевых платформ и объединяет их в bundle | Один ZIP закрывает основные сценарии поставки в 1С-среды |
+| Портируемость поставки | Release pipeline собирает DLL/SO для 4 целевых платформ, переименовывает их с версией пакета, генерирует `out/Manifest.xml` и формирует `WebTransportAddIn-{version}.zip` | Один bundle с версией в имени закрывает основные сценарии поставки в 1С-среды и упрощает хранение релизов |
 
 Ключевые технологические решения:
 
@@ -315,13 +315,14 @@ graph TB
     Repo[Репозиторий проекта]
     Cargo[Cargo / cargo-make]
     Targets[4 target binaries]
-    Zip[WebTransportAddIn.zip]
-    Manifest[Manifest.xml]
+    Manifest[generated out/Manifest.xml]
+    Zip[WebTransportAddIn-{version}.zip]
     OneC[Среда 1С]
     Demo[Demo.epf]
 
     Repo --> Cargo
     Cargo --> Targets
+    Cargo --> Manifest
     Targets --> Zip
     Manifest --> Zip
     Zip --> OneC
@@ -333,7 +334,7 @@ graph TB
 | Узел | Описание | Технология |
 |------|----------|------------|
 | Рабочая станция/CI | Сборка native библиотеки | Rust toolchain, cargo, cargo-make |
-| Bundle archive | Пакет поставки | ZIP + [Manifest.xml](/home/alko/develop/open-source/websocket1c/Manifest.xml) |
+| Bundle archive | Пакет поставки | `out/WebTransportAddIn-{version}.zip` + generated `out/Manifest.xml` |
 | Платформа 1С | Среда исполнения внешней компоненты | Windows/Linux, 1С native add-in |
 | Demo processing | Тестовая внешняя обработка | `Demo.epf`, собирается через Designer |
 
@@ -341,16 +342,18 @@ graph TB
 
 Содержимое bundle:
 
-- `WebTransportAddIn_x32.dll`
-- `WebTransportAddIn_x64.dll`
-- `WebTransportAddIn_x32.so`
-- `WebTransportAddIn_x64.so`
+- `WebTransportAddIn_x32-{version}.dll`
+- `WebTransportAddIn_x64-{version}.dll`
+- `WebTransportAddIn_x32-{version}.so`
+- `WebTransportAddIn_x64-{version}.so`
 - `Manifest.xml`
 
 Особенности:
 
 - Linux-скрипт в [Makefile.toml](/home/alko/develop/open-source/websocket1c/Makefile.toml) собирает цели `i686/x86_64` для Windows GNU и Linux GNU.
-- Скрипт [scripts/build-release.sh](/home/alko/develop/open-source/websocket1c/scripts/build-release.sh) дополнительно обновляет шаблон компоненты внутри demo.
+- `pack-to-zip` вычисляет версию пакета через `cargo pkgid`, собирает `out/WebTransportAddIn-{version}.zip` и оставляет совместимый alias `out/WebTransportAddIn.zip`.
+- Во время релизной упаковки манифест генерируется в `out/Manifest.xml` и содержит имена DLL/SO с версией пакета; [Manifest.xml](/home/alko/develop/open-source/websocket1c/Manifest.xml) из репозитория остаётся шаблоном для локальных/dev сценариев.
+- Скрипт [scripts/build-release.sh](/home/alko/develop/open-source/websocket1c/scripts/build-release.sh) по умолчанию ожидает архив с версией в имени и дополнительно обновляет шаблон компоненты внутри demo.
 - Скрипт [scripts/build-epf.sh](/home/alko/develop/open-source/websocket1c/scripts/build-epf.sh) требует локальную установленную платформу 1С и путь к инфобазе.
 
 ---
@@ -436,12 +439,12 @@ graph TD
 
 | Атрибут | Сценарий | Ожидаемое поведение |
 |---------|----------|---------------------|
-| Совместимость | Разработчик подключает ZIP bundle в 1С на Windows или Linux | Платформа загружает подходящий DLL/SO из `Manifest.xml` |
+| Совместимость | Разработчик подключает ZIP bundle с версией в имени в 1С на Windows или Linux | Платформа загружает подходящий DLL/SO по путям из `Manifest.xml` внутри bundle |
 | Надёжность | 1С не отвечает на HTTP-запрос вовремя | Клиент получает `504`, зависший waiter очищается |
 | Надёжность | Для неизвестного `taskId` приходит команда завершения | Метод возвращает `Ложь`, а не повреждает состояние сервера |
 | Расширяемость | Нужно добавить новый MCP tool | 1С регистрирует его через JSON-описание без модификации transport слоя |
 | Безопасность интеграции | MCP запрос приходит с неразрешённого Origin | Запрос отклоняется allow-list логикой |
-| Эксплуатация | Нужно выпустить новую версию пакета | Release pipeline собирает 4 бинарника и формирует ZIP |
+| Эксплуатация | Нужно выпустить новую версию пакета | Release pipeline собирает 4 бинарника, генерирует `Manifest.xml` с путями, содержащими версию пакета, и формирует `WebTransportAddIn-{version}.zip` |
 
 ---
 
