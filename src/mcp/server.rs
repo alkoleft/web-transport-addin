@@ -172,10 +172,43 @@ impl ResponseMode {
     }
 }
 
+const INTERNAL_TASK_PREFIX: &str = "internal:";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskVisibility {
+    Public,
+    Internal,
+}
+
+impl TaskVisibility {
+    fn as_str(self) -> &'static str {
+        match self {
+            TaskVisibility::Public => "public",
+            TaskVisibility::Internal => "internal",
+        }
+    }
+
+    fn format_task_id(self, sequence: u64) -> String {
+        match self {
+            TaskVisibility::Public => sequence.to_string(),
+            TaskVisibility::Internal => format!("{INTERNAL_TASK_PREFIX}{sequence}"),
+        }
+    }
+}
+
 #[derive(Clone)]
 enum TaskKind {
     Public,
-    StreamSse { sink: ClientSink },
+    InternalSse { sink: ClientSink },
+}
+
+impl TaskKind {
+    fn visibility(&self) -> TaskVisibility {
+        match self {
+            TaskKind::Public => TaskVisibility::Public,
+            TaskKind::InternalSse { .. } => TaskVisibility::Internal,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -197,8 +230,14 @@ impl TaskEntry {
     }
 
     fn is_public(&self) -> bool {
-        matches!(self.kind, TaskKind::Public)
+        self.kind.visibility() == TaskVisibility::Public
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolCallRoute {
+    Sync,
+    InternalTask,
 }
 
 pub(super) fn start_mcp_server(
@@ -565,15 +604,6 @@ impl McpBridgeHandler {
         }
     }
 
-    fn normalize_tool_for_rmcp(tool: rmcp::model::Tool) -> rmcp::model::Tool {
-        let mut tool = tool;
-        if Self::task_support(&tool) == TaskSupport::Required {
-            let execution = tool.execution.take().unwrap_or_default();
-            tool.execution = Some(execution.with_task_support(TaskSupport::Optional));
-        }
-        tool
-    }
-
     fn ensure_response_mode_allowed(
         task_support: TaskSupport,
         response_mode: ResponseMode,
@@ -581,18 +611,46 @@ impl McpBridgeHandler {
         match (task_support, response_mode) {
             (TaskSupport::Forbidden, ResponseMode::SyncJson)
             | (TaskSupport::Optional, _)
-            | (TaskSupport::Required, ResponseMode::StreamSse)
             | (TaskSupport::Required, ResponseMode::Task) => Ok(()),
             (TaskSupport::Forbidden, ResponseMode::StreamSse)
             | (TaskSupport::Forbidden, ResponseMode::Task) => Err(McpError::invalid_params(
                 "Tool does not support streaming or task-based invocation",
                 None,
             )),
-            (TaskSupport::Required, ResponseMode::SyncJson) => Err(McpError::invalid_params(
-                "Tool requires streaming or task-based invocation",
+            (TaskSupport::Required, ResponseMode::SyncJson)
+            | (TaskSupport::Required, ResponseMode::StreamSse) => Err(
+                McpError::invalid_params(
+                    "Tool requires task-based invocation",
+                    None,
+                ),
+            ),
+        }
+    }
+
+    fn resolve_call_tool_route(
+        task_support: TaskSupport,
+        response_mode: ResponseMode,
+    ) -> Result<ToolCallRoute, McpError> {
+        Self::ensure_response_mode_allowed(task_support, response_mode)?;
+        match response_mode {
+            ResponseMode::Task => Err(McpError::invalid_params(
+                "Use task-augmented tools/call for responseMode=task",
                 None,
             )),
+            ResponseMode::SyncJson | ResponseMode::StreamSse => match task_support {
+                TaskSupport::Forbidden => Ok(ToolCallRoute::Sync),
+                TaskSupport::Optional => Ok(ToolCallRoute::InternalTask),
+                TaskSupport::Required => Err(McpError::invalid_params(
+                    "Tool requires task-based invocation",
+                    None,
+                )),
+            },
         }
+    }
+
+    fn next_task_id(&self, visibility: TaskVisibility) -> String {
+        let sequence = self.request_counter.fetch_add(1, Ordering::Relaxed);
+        visibility.format_task_id(sequence)
     }
 
     async fn dispatch_request<T>(
@@ -673,16 +731,17 @@ impl McpBridgeHandler {
             .map_err(|_| McpError::internal_error("Handler timeout", None))?
     }
 
-    async fn call_stream_tool(
+    async fn call_internal_task_tool(
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        let visibility = TaskVisibility::Internal;
         let task = self
             .create_task_entry(
                 &request,
                 &context,
-                TaskKind::StreamSse {
+                TaskKind::InternalSse {
                     sink: context.peer.clone(),
                 },
             )
@@ -700,6 +759,7 @@ impl McpBridgeHandler {
             "executionMode": "task",
             "responseMode": ResponseMode::StreamSse.as_str(),
             "taskId": task_id,
+            "taskVisibility": visibility.as_str(),
             "name": request.name,
             "arguments": args_payload,
             "progressToken": progress_token,
@@ -762,10 +822,8 @@ impl McpBridgeHandler {
         context: &RequestContext<RoleServer>,
         kind: TaskKind,
     ) -> Result<Task, McpError> {
-        let task_id = self
-            .request_counter
-            .fetch_add(1, Ordering::Relaxed)
-            .to_string();
+        let visibility = kind.visibility();
+        let task_id = self.next_task_id(visibility);
         let timestamp = chrono::Utc::now().to_rfc3339();
         let task = Task::new(
             task_id.clone(),
@@ -864,7 +922,7 @@ impl McpBridgeHandler {
         );
         match kind {
             TaskKind::Public => self.broadcast_notification(notification).await,
-            TaskKind::StreamSse { sink } => {
+            TaskKind::InternalSse { sink } => {
                 let _ = sink.send_notification(notification).await;
             }
         }
@@ -987,11 +1045,7 @@ impl ServerHandler for McpBridgeHandler {
         self.registry
             .read()
             .ok()
-            .and_then(|guard| {
-                guard
-                    .get_tool(name)
-                    .map(|entry| Self::normalize_tool_for_rmcp(entry.tool))
-            })
+            .and_then(|guard| guard.get_tool(name).map(|entry| entry.tool))
     }
 
     fn call_tool(
@@ -1032,37 +1086,26 @@ impl ServerHandler for McpBridgeHandler {
             }
 
             let task_support = Self::task_support(&entry.tool);
-            let mut response_mode = Self::request_response_mode(&request)?;
-            if task_support == TaskSupport::Required && response_mode == ResponseMode::SyncJson {
-                response_mode = ResponseMode::StreamSse;
+            let response_mode = Self::request_response_mode(&request)?;
+            match Self::resolve_call_tool_route(task_support, response_mode)? {
+                ToolCallRoute::Sync => {
+                    let progress_token = Self::request_progress_token(&request, &context.meta);
+                    let args_payload = match request.arguments {
+                        Some(map) => serde_json::Value::Object(map),
+                        None => serde_json::Value::Null,
+                    };
+                    let payload = serde_json::json!({
+                        "executionMode": "sync",
+                        "responseMode": ResponseMode::SyncJson.as_str(),
+                        "name": request.name,
+                        "arguments": args_payload,
+                        "progressToken": progress_token.map(progress_token_to_json),
+                    });
+
+                    self.dispatch_request("MCP_TOOL_CALL", payload).await
+                }
+                ToolCallRoute::InternalTask => self.call_internal_task_tool(request, context).await,
             }
-            Self::ensure_response_mode_allowed(task_support, response_mode)?;
-
-            if response_mode == ResponseMode::Task {
-                return Err(McpError::invalid_params(
-                    "Use task-augmented tools/call for responseMode=task",
-                    None,
-                ));
-            }
-
-            if response_mode == ResponseMode::StreamSse {
-                return self.call_stream_tool(request, context).await;
-            }
-
-            let progress_token = Self::request_progress_token(&request, &context.meta);
-            let args_payload = match request.arguments {
-                Some(map) => serde_json::Value::Object(map),
-                None => serde_json::Value::Null,
-            };
-            let payload = serde_json::json!({
-                "executionMode": "sync",
-                "responseMode": ResponseMode::SyncJson.as_str(),
-                "name": request.name,
-                "arguments": args_payload,
-                "progressToken": progress_token.map(progress_token_to_json),
-            });
-
-            self.dispatch_request("MCP_TOOL_CALL", payload).await
         }
     }
 
@@ -1122,6 +1165,7 @@ impl ServerHandler for McpBridgeHandler {
                 "executionMode": "task",
                 "responseMode": ResponseMode::Task.as_str(),
                 "taskId": task.task_id,
+                "taskVisibility": TaskVisibility::Public.as_str(),
                 "name": request.name,
                 "arguments": args_payload,
                 "progressToken": progress_token,
@@ -1646,6 +1690,33 @@ mod tests {
         registry
     }
 
+    fn make_registry_with_optional_task_tool() -> Registry {
+        use rmcp::model::Tool;
+        let mut registry = Registry::default();
+        let tool: Tool = serde_json::from_value(serde_json::json!({
+            "name": "long_job_optional",
+            "description": "Long-running optional job",
+            "inputSchema": {
+                "type": "object"
+            },
+            "execution": {
+                "taskSupport": "optional"
+            }
+        }))
+        .unwrap();
+        #[cfg(feature = "validate-schema")]
+        {
+            let schema_value = serde_json::Value::Object(tool.input_schema.as_ref().clone());
+            let schema = jsonschema::validator_for(&schema_value).unwrap();
+            registry.register_tool(tool, schema);
+        }
+        #[cfg(not(feature = "validate-schema"))]
+        {
+            registry.register_tool(tool);
+        }
+        registry
+    }
+
     fn make_test_handler(registry: Registry) -> Arc<McpBridgeHandler> {
         Arc::new(McpBridgeHandler {
             connection: None,
@@ -1939,12 +2010,64 @@ mod tests {
             TaskSupport::Required,
             ResponseMode::StreamSse,
         )
+        .is_err());
+        assert!(McpBridgeHandler::ensure_response_mode_allowed(
+            TaskSupport::Required,
+            ResponseMode::Task,
+        )
         .is_ok());
         assert!(McpBridgeHandler::ensure_response_mode_allowed(
             TaskSupport::Forbidden,
             ResponseMode::StreamSse,
         )
         .is_err());
+    }
+
+    #[test]
+    fn resolve_call_tool_route_matches_adr_0001() {
+        assert_eq!(
+            McpBridgeHandler::resolve_call_tool_route(
+                TaskSupport::Forbidden,
+                ResponseMode::SyncJson,
+            )
+            .unwrap(),
+            ToolCallRoute::Sync
+        );
+        assert_eq!(
+            McpBridgeHandler::resolve_call_tool_route(
+                TaskSupport::Optional,
+                ResponseMode::SyncJson,
+            )
+            .unwrap(),
+            ToolCallRoute::InternalTask
+        );
+        assert_eq!(
+            McpBridgeHandler::resolve_call_tool_route(
+                TaskSupport::Optional,
+                ResponseMode::StreamSse,
+            )
+            .unwrap(),
+            ToolCallRoute::InternalTask
+        );
+        assert!(McpBridgeHandler::resolve_call_tool_route(
+            TaskSupport::Required,
+            ResponseMode::SyncJson,
+        )
+        .is_err());
+        assert!(McpBridgeHandler::resolve_call_tool_route(
+            TaskSupport::Required,
+            ResponseMode::StreamSse,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn task_visibility_formats_internal_ids_with_prefix() {
+        assert_eq!(TaskVisibility::Public.format_task_id(42), "42");
+        assert_eq!(
+            TaskVisibility::Internal.format_task_id(42),
+            format!("{INTERNAL_TASK_PREFIX}42")
+        );
     }
 
     // ── normalize_protocol_version ───────────────────────────────────────────
@@ -2207,6 +2330,24 @@ mod tests {
             assert!(
                 err.is_err(),
                 "required-task tool should reject plain tools/call"
+            );
+            client.cancel().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rmcp_client_call_tool_optional_task_allows_plain_call_path() {
+            let registry = make_registry_with_optional_task_tool();
+            let (base, _state) = start_test_server(registry).await;
+            let client = connect(&base).await;
+            let params = serde_json::from_value(serde_json::json!({
+                "name": "long_job_optional",
+                "arguments": {}
+            }))
+            .unwrap();
+            let err = client.call_tool(params).await;
+            assert!(
+                err.is_err(),
+                "plain optional-task call should reach internal async path and fail only because 1C connection is absent"
             );
             client.cancel().await.unwrap();
         }
