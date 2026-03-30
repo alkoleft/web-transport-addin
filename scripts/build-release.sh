@@ -19,6 +19,11 @@ require_cmd() {
   command -v "$cmd" >/dev/null 2>&1 || die "Missing command: $cmd"
 }
 
+package_version() {
+  require_cmd cargo
+  cargo pkgid | sed -E 's/^.*@([^ ]+)$/\1/'
+}
+
 build_zip() {
   require_cmd cargo
   require_cmd zip
@@ -45,7 +50,7 @@ build_demo() {
 
 main() {
   if [[ -z "$OUT_ZIP" ]]; then
-    OUT_ZIP="$ROOT_DIR/out/WebTransportAddIn.zip"
+    OUT_ZIP="$ROOT_DIR/out/WebTransportAddIn-$(package_version).zip"
   fi
   build_zip
   build_demo

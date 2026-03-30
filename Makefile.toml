@@ -78,25 +78,65 @@ script_runner = "powershell"
 script_extension = "ps1"
 script = '''
 New-Item -ItemType Directory -Path out -Force -ErrorAction SilentlyContinue
-cp target/i686-pc-windows-msvc/release/webtransport.dll out/WebTransportAddIn_x32.dll
-cp target/x86_64-pc-windows-msvc/release/webtransport.dll out/WebTransportAddIn_x64.dll
-cp target/i686-unknown-linux-gnu/release/libwebtransport.so out/WebTransportAddIn_x32.so
-cp target/x86_64-unknown-linux-gnu/release/libwebtransport.so out/WebTransportAddIn_x64.so
-cp Manifest.xml out/
-Compress-Archive -DestinationPath out/WebTransportAddIn.zip -Path out/WebTransportAddIn_x64.dll, out/WebTransportAddIn_x32.dll, out/WebTransportAddIn_x32.so, out/WebTransportAddIn_x64.so, out/Manifest.xml -Force
-Copy-Item -LiteralPath out/WebTransportAddIn.zip -Destination demo/Demo/Templates/Компонента/Ext/Template.bin -Force
+$Version = ((cargo pkgid) -split '@')[-1]
+$DllX32 = "WebTransportAddIn_x32-$Version.dll"
+$DllX64 = "WebTransportAddIn_x64-$Version.dll"
+$SoX32 = "WebTransportAddIn_x32-$Version.so"
+$SoX64 = "WebTransportAddIn_x64-$Version.so"
+$ManifestPath = "out/Manifest.xml"
+$VersionedZipPath = "out/WebTransportAddIn-$Version.zip"
+$LegacyZipPath = "out/WebTransportAddIn.zip"
+
+Copy-Item target/i686-pc-windows-msvc/release/webtransport.dll "out/$DllX32" -Force
+Copy-Item target/x86_64-pc-windows-msvc/release/webtransport.dll "out/$DllX64" -Force
+Copy-Item target/i686-unknown-linux-gnu/release/libwebtransport.so "out/$SoX32" -Force
+Copy-Item target/x86_64-unknown-linux-gnu/release/libwebtransport.so "out/$SoX64" -Force
+
+@"
+<?xml version="1.0" encoding="UTF-8"?>
+<bundle xmlns="http://v8.1c.ru/8.2/addin/bundle" name="WebTransportAddIn" version="$Version" description="WebSocket/HTTP add-in for 1C">
+    <component os="Windows" path="$DllX32" type="native" arch="i386" />
+    <component os="Windows" path="$DllX64" type="native" arch="x86_64" />
+    <component os="Linux" path="$SoX32" type="native" arch="i386" />
+    <component os="Linux" path="$SoX64" type="native" arch="x86_64" />
+</bundle>
+"@ | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
+
+Compress-Archive -DestinationPath $VersionedZipPath -Path "out/$DllX64", "out/$DllX32", "out/$SoX32", "out/$SoX64", $ManifestPath -Force
+Copy-Item -LiteralPath $VersionedZipPath -Destination $LegacyZipPath -Force
+Copy-Item -LiteralPath $VersionedZipPath -Destination demo/Demo/Templates/Компонента/Ext/Template.bin -Force
 '''
 
 [tasks.pack-to-zip.linux]
 script = '''
 mkdir -p out
-cp target/i686-pc-windows-gnu/release/webtransport.dll out/WebTransportAddIn_x32.dll
-cp target/x86_64-pc-windows-gnu/release/webtransport.dll out/WebTransportAddIn_x64.dll
-cp target/i686-unknown-linux-gnu/release/libwebtransport.so out/WebTransportAddIn_x32.so
-cp target/x86_64-unknown-linux-gnu/release/libwebtransport.so out/WebTransportAddIn_x64.so
-cp Manifest.xml out/
-zip -r -j out/WebTransportAddIn.zip out/WebTransportAddIn_x64.dll out/WebTransportAddIn_x32.dll out/WebTransportAddIn_x32.so out/WebTransportAddIn_x64.so Manifest.xml
-cp out/WebTransportAddIn.zip demo/Demo/Templates/Компонента/Ext/Template.bin
+VERSION="$(cargo pkgid | sed -E 's/^.*@([^ ]+)$/\1/')"
+DLL_X32="WebTransportAddIn_x32-$VERSION.dll"
+DLL_X64="WebTransportAddIn_x64-$VERSION.dll"
+SO_X32="WebTransportAddIn_x32-$VERSION.so"
+SO_X64="WebTransportAddIn_x64-$VERSION.so"
+MANIFEST_PATH="out/Manifest.xml"
+VERSIONED_ZIP_PATH="out/WebTransportAddIn-$VERSION.zip"
+LEGACY_ZIP_PATH="out/WebTransportAddIn.zip"
+
+cp target/i686-pc-windows-gnu/release/webtransport.dll "out/$DLL_X32"
+cp target/x86_64-pc-windows-gnu/release/webtransport.dll "out/$DLL_X64"
+cp target/i686-unknown-linux-gnu/release/libwebtransport.so "out/$SO_X32"
+cp target/x86_64-unknown-linux-gnu/release/libwebtransport.so "out/$SO_X64"
+
+cat > "$MANIFEST_PATH" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<bundle xmlns="http://v8.1c.ru/8.2/addin/bundle" name="WebTransportAddIn" version="$VERSION" description="WebSocket/HTTP add-in for 1C">
+    <component os="Windows" path="$DLL_X32" type="native" arch="i386" />
+    <component os="Windows" path="$DLL_X64" type="native" arch="x86_64" />
+    <component os="Linux" path="$SO_X32" type="native" arch="i386" />
+    <component os="Linux" path="$SO_X64" type="native" arch="x86_64" />
+</bundle>
+EOF
+
+zip -j -q "$VERSIONED_ZIP_PATH" "out/$DLL_X64" "out/$DLL_X32" "out/$SO_X32" "out/$SO_X64" "$MANIFEST_PATH"
+cp "$VERSIONED_ZIP_PATH" "$LEGACY_ZIP_PATH"
+cp "$VERSIONED_ZIP_PATH" demo/Demo/Templates/Компонента/Ext/Template.bin
 '''
 
 [tasks.pack]
