@@ -276,6 +276,38 @@ impl McpAddIn {
         })
     }
 
+    fn mcp_notify_progress(
+        &mut self,
+        progress_token: &mut Variant,
+        progress: &mut Variant,
+        total: &mut Variant,
+        message: &mut Variant,
+        return_value: &mut Variant,
+    ) -> AddinResult {
+        let progress_token = parse_progress_token(progress_token)?;
+        let progress = parse_numeric_arg(progress)?;
+        let total = match parse_numeric_arg(total) {
+            Ok(value) if value >= 0.0 => Some(value),
+            _ => None,
+        };
+        let message = match message.get_string() {
+            Ok(value) if !value.trim().is_empty() => Some(value),
+            _ => None,
+        };
+
+        let Some(server) = self.server.as_ref() else {
+            return Err("MCP сервер не запущен".to_owned().into());
+        };
+
+        self.runtime.clone().block_on(async {
+            server
+                .notify_progress(progress_token, progress, total, message)
+                .await?;
+            return_value.set_bool(true);
+            Ok(())
+        })
+    }
+
     fn mcp_set_allowed_origins(
         &mut self,
         origins: &mut Variant,
@@ -595,6 +627,10 @@ impl SimpleAddin for McpAddIn {
                 method: Methods::Method4(Self::mcp_notify_task_progress),
             },
             MethodInfo {
+                name: name!("УведомитьОПрогрессе"),
+                method: Methods::Method4(Self::mcp_notify_progress),
+            },
+            MethodInfo {
                 name: name!("УстановитьРазрешенныеOrigins"),
                 method: Methods::Method1(Self::mcp_set_allowed_origins),
             },
@@ -748,6 +784,36 @@ fn parse_numeric_arg(value: &Variant) -> Result<f64, Box<dyn Error>> {
         .get_f64()
         .or_else(|_| value.get_i32().map(|number| number as f64))
         .map_err(|err| -> Box<dyn Error> { err.into() })
+}
+
+fn parse_progress_token(value: &Variant) -> Result<rmcp::model::ProgressToken, Box<dyn Error>> {
+    if let Ok(number) = value.get_i32() {
+        return Ok(rmcp::model::ProgressToken(
+            rmcp::model::NumberOrString::Number(i64::from(number)),
+        ));
+    }
+
+    if let Ok(number) = value.get_f64() {
+        if number.is_finite()
+            && number.fract() == 0.0
+            && number >= i64::MIN as f64
+            && number <= i64::MAX as f64
+        {
+            return Ok(rmcp::model::ProgressToken(
+                rmcp::model::NumberOrString::Number(number as i64),
+            ));
+        }
+    }
+
+    if let Ok(token) = value.get_string() {
+        if !token.trim().is_empty() {
+            return Ok(rmcp::model::ProgressToken(
+                rmcp::model::NumberOrString::String(token.into()),
+            ));
+        }
+    }
+
+    Err("Некорректный progressToken".to_owned().into())
 }
 
 #[cfg(feature = "validate-schema")]

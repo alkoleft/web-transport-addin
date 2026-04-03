@@ -101,6 +101,18 @@ impl McpServerState {
             .notify_task_progress(task_id, progress, total, message)
             .await
     }
+
+    pub(super) async fn notify_progress(
+        &self,
+        progress_token: ProgressToken,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        self.handler
+            .notify_progress(progress_token, progress, total, message)
+            .await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -789,6 +801,27 @@ impl McpBridgeHandler {
         let progress_token =
             progress_token.ok_or_else(|| "Для MCP задачи не задан progressToken".to_owned())?;
 
+        let mut params = ProgressNotificationParam::new(progress_token, progress);
+        if let Some(total) = total {
+            params = params.with_total(total);
+        }
+        if let Some(message) = message {
+            params = params.with_message(message);
+        }
+        self.broadcast_notification(rmcp::model::ServerNotification::ProgressNotification(
+            ProgressNotification::new(params),
+        ))
+        .await;
+        Ok(())
+    }
+
+    async fn notify_progress(
+        &self,
+        progress_token: ProgressToken,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<String>,
+    ) -> Result<(), String> {
         let mut params = ProgressNotificationParam::new(progress_token, progress);
         if let Some(total) = total {
             params = params.with_total(total);
