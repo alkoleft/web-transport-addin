@@ -20,6 +20,7 @@ jobs:
             mingw-w64 \
             gcc-multilib \
             libc6-dev-i386 \
+            unzip \
             zip
 
       - name: Setup Rust
@@ -30,6 +31,7 @@ jobs:
             x86_64-pc-windows-gnu
             i686-unknown-linux-gnu
             x86_64-unknown-linux-gnu
+            x86_64-apple-darwin
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -42,14 +44,30 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Install cargo-make
-        run: cargo install cargo-make
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-make,cargo-zigbuild
 
       - name: Build package
         run: cargo make pack
 
+      - name: Verify Darwin artifact in ZIP
+        run: |
+          version="$(cargo pkgid | sed -E 's/^.*@([^ ]+)$/\1/')"
+          zip_path="out/WebTransportAddIn-${version}.zip"
+          test -f "$zip_path"
+          unzip -l "$zip_path" | tee zip-contents.txt
+          grep -F "WebTransportAddIn_x64-${version}.dylib" zip-contents.txt
+          unzip -p "$zip_path" Manifest.xml | grep -F '<component os="MacOS"'
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WebTransportAddIn.zip
-          path: out/WebTransportAddIn.zip
+          name: WebTransportAddIn
+          path: |
+            out/WebTransportAddIn-*.zip
+            out/WebTransportAddIn.zip
