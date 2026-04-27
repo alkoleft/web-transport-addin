@@ -37,11 +37,13 @@ use rmcp::transport::streamable_http_server::tower::{
     StreamableHttpServerConfig, StreamableHttpService,
 };
 use rmcp::ErrorData as McpError;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
 
 use super::registry::{Registry, ResolveResourceError, ResolvedResource, ToolEntry};
+
+type ProgressResetMap = Arc<Mutex<HashMap<String, HashMap<String, mpsc::Sender<()>>>>>;
 
 /// Server identity and instructions, settable from 1C before starting the server.
 #[derive(Clone, Debug, Default)]
@@ -214,6 +216,7 @@ pub(super) fn start_mcp_server(
         server_info,
         subscriptions,
         tasks,
+        progress_resets: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let mut service_config = StreamableHttpServerConfig::default();
@@ -267,6 +270,7 @@ fn start_mcp_server_with_listener(
     server_info: Arc<RwLock<McpServerInfo>>,
     subscriptions: Arc<Mutex<HashMap<String, Vec<ClientSink>>>>,
     tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
+    progress_resets: ProgressResetMap,
 ) -> Result<McpServerState, Box<dyn Error>> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -280,6 +284,7 @@ fn start_mcp_server_with_listener(
         server_info,
         subscriptions,
         tasks,
+        progress_resets,
     });
 
     let service = StreamableHttpService::new(
@@ -527,6 +532,7 @@ struct McpBridgeHandler {
     server_info: Arc<RwLock<McpServerInfo>>,
     subscriptions: Arc<Mutex<HashMap<String, Vec<ClientSink>>>>,
     tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
+    progress_resets: ProgressResetMap,
 }
 
 impl McpBridgeHandler {
@@ -642,6 +648,7 @@ impl McpBridgeHandler {
             .request_counter
             .fetch_add(1, Ordering::Relaxed)
             .to_string();
+        let progress_reset_key = progress_reset_key(&payload);
         let payload = insert_request_id(payload, request_id.clone())?;
 
         let (tx, rx) = oneshot::channel();
@@ -649,27 +656,106 @@ impl McpBridgeHandler {
             let mut map = self.response_map.lock().await;
             map.insert(request_id.clone(), tx);
         }
+        let reset_rx = self
+            .register_progress_reset(request_id.as_str(), &progress_reset_key)
+            .await;
         if let Err(err) = self.emit_event(event, payload) {
             let mut map = self.response_map.lock().await;
             map.remove(&request_id);
+            self.unregister_progress_reset(request_id.as_str(), &progress_reset_key)
+                .await;
             return Err(err);
         }
 
-        let response = match tokio::time::timeout(self.response_timeout, rx).await {
-            Ok(Ok(response)) => response,
+        let response = self
+            .wait_for_response(request_id.as_str(), rx, reset_rx)
+            .await;
+        self.unregister_progress_reset(request_id.as_str(), &progress_reset_key)
+            .await;
+        let response = response?;
+
+        parse_mcp_response::<T>(response)
+    }
+
+    async fn wait_for_response(
+        &self,
+        request_id: &str,
+        rx: oneshot::Receiver<McpResponse>,
+        reset_rx: Option<mpsc::Receiver<()>>,
+    ) -> Result<McpResponse, McpError> {
+        let Some(mut reset_rx) = reset_rx else {
+            return self.wait_for_response_without_progress(request_id, rx).await;
+        };
+        let mut rx = rx;
+        loop {
+            tokio::select! {
+                response = &mut rx => {
+                    match response {
+                        Ok(response) => return Ok(response),
+                        Err(_) => {
+                            let mut map = self.response_map.lock().await;
+                            map.remove(request_id);
+                            return Err(McpError::internal_error("Response channel closed", None));
+                        }
+                    }
+                }
+                _ = reset_rx.recv() => {
+                }
+                _ = tokio::time::sleep(self.response_timeout) => {
+                    let mut map = self.response_map.lock().await;
+                    map.remove(request_id);
+                    return Err(McpError::internal_error("Handler timeout", None));
+                }
+            }
+        }
+    }
+
+    async fn wait_for_response_without_progress(
+        &self,
+        request_id: &str,
+        rx: oneshot::Receiver<McpResponse>,
+    ) -> Result<McpResponse, McpError> {
+        match tokio::time::timeout(self.response_timeout, rx).await {
+            Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => {
                 let mut map = self.response_map.lock().await;
-                map.remove(&request_id);
-                return Err(McpError::internal_error("Response channel closed", None));
+                map.remove(request_id);
+                Err(McpError::internal_error("Response channel closed", None))
             }
             Err(_) => {
                 let mut map = self.response_map.lock().await;
-                map.remove(&request_id);
-                return Err(McpError::internal_error("Handler timeout", None));
+                map.remove(request_id);
+                Err(McpError::internal_error("Handler timeout", None))
             }
-        };
+        }
+    }
 
-        parse_mcp_response::<T>(response)
+    async fn register_progress_reset(
+        &self,
+        request_id: &str,
+        key: &Option<String>,
+    ) -> Option<mpsc::Receiver<()>> {
+        if let Some(key) = key.as_ref() {
+            let (reset_tx, reset_rx) = mpsc::channel(1);
+            let mut map = self.progress_resets.lock().await;
+            map.entry(key.clone())
+                .or_default()
+                .insert(request_id.to_owned(), reset_tx);
+            return Some(reset_rx);
+        }
+        None
+    }
+
+    async fn unregister_progress_reset(&self, request_id: &str, key: &Option<String>) {
+        if let Some(key) = key.as_ref() {
+            let mut map = self.progress_resets.lock().await;
+            if let Some(requests) = map.get_mut(key) {
+                requests.remove(request_id);
+                if requests.is_empty() {
+                    map.remove(key);
+                }
+            }
+        }
     }
 
     fn emit_event(&self, event: &str, payload: serde_json::Value) -> Result<(), McpError> {
@@ -822,6 +908,10 @@ impl McpBridgeHandler {
         total: Option<f64>,
         message: Option<String>,
     ) -> Result<(), String> {
+        for sender in self.progress_reset_senders(&progress_token).await {
+            let _ = sender.try_send(());
+        }
+
         let mut params = ProgressNotificationParam::new(progress_token, progress);
         if let Some(total) = total {
             params = params.with_total(total);
@@ -834,6 +924,17 @@ impl McpBridgeHandler {
         ))
         .await;
         Ok(())
+    }
+
+    async fn progress_reset_senders(
+        &self,
+        progress_token: &ProgressToken,
+    ) -> Vec<mpsc::Sender<()>> {
+        let key = progress_token_key(progress_token);
+        let map = self.progress_resets.lock().await;
+        map.get(key.as_str())
+            .map(|requests| requests.values().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -1375,6 +1476,18 @@ fn progress_token_to_json(token: ProgressToken) -> serde_json::Value {
     }
 }
 
+fn progress_reset_key(payload: &serde_json::Value) -> Option<String> {
+    payload.get("progressToken").and_then(progress_value_key)
+}
+
+fn progress_token_key(token: &ProgressToken) -> String {
+    progress_value_key(&progress_token_to_json(token.clone())).unwrap_or_default()
+}
+
+fn progress_value_key(value: &serde_json::Value) -> Option<String> {
+    serde_json::to_string(value).ok()
+}
+
 fn parse_mcp_response<T>(response: McpResponse) -> Result<T, McpError>
 where
     T: serde::de::DeserializeOwned,
@@ -1460,6 +1573,7 @@ mod tests {
                 server_info,
                 Arc::new(Mutex::new(HashMap::new())),
                 tasks,
+                Arc::new(Mutex::new(HashMap::new())),
             )
             .unwrap();
             let _ = state_tx.send(state);
@@ -1578,6 +1692,7 @@ mod tests {
             server_info: Arc::new(RwLock::new(McpServerInfo::default())),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            progress_resets: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -1591,6 +1706,42 @@ mod tests {
         .unwrap();
         registry.register_resource(resource);
         registry
+    }
+
+    #[tokio::test]
+    async fn wait_for_response_resets_timeout_on_progress() {
+        let handler = make_test_handler(Registry::default());
+        let (tx, rx) = oneshot::channel();
+        let (reset_tx, reset_rx) = mpsc::channel(1);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            reset_tx.send(()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tx.send(McpResponse {
+                status: 200,
+                body: r#"{"result":{"ok":true}}"#.to_owned(),
+            })
+            .unwrap();
+        });
+
+        let response = handler
+            .wait_for_response("request-1", rx, Some(reset_rx))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, 200);
+    }
+
+    #[tokio::test]
+    async fn wait_for_response_without_progress_still_times_out() {
+        let handler = make_test_handler(Registry::default());
+        let (_tx, rx) = oneshot::channel();
+
+        let response = handler.wait_for_response("request-1", rx, None).await;
+
+        assert!(response.is_err());
+        assert!(response.unwrap_err().message.contains("Handler timeout"));
     }
 
     fn make_registry_with_prompt() -> Registry {
