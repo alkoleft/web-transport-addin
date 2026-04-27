@@ -352,7 +352,7 @@ graph TB
 Особенности:
 
 - Shell-ветки в [Makefile.toml](/home/alko/develop/open-source/websocket1c/Makefile.toml) собирают цели `i686/x86_64` для Windows GNU и Linux GNU, а также `x86_64-apple-darwin` для macOS.
-- `pack-to-zip` вычисляет версию пакета через `cargo pkgid`, собирает `out/WebTransportAddIn-{version}.zip` и оставляет совместимый alias `out/WebTransportAddIn.zip`.
+- `pack-to-zip` вычисляет версию пакета через `cargo pkgid` и собирает единственный release archive `out/WebTransportAddIn-{version}.zip`.
 - Во время релизной упаковки манифест генерируется в `out/Manifest.xml` и содержит имена DLL/SO/DYLIB с версией пакета; [Manifest.xml](/home/alko/develop/open-source/websocket1c/Manifest.xml) из репозитория остаётся шаблоном для локальных/dev сценариев.
 - Скрипт [scripts/build-release.sh](/home/alko/develop/open-source/websocket1c/scripts/build-release.sh) по умолчанию ожидает архив с версией в имени и дополнительно обновляет шаблон компоненты внутри demo.
 - Скрипт [scripts/build-epf.sh](/home/alko/develop/open-source/websocket1c/scripts/build-epf.sh) требует локальную установленную платформу 1С и путь к инфобазе.

@@ -141,7 +141,6 @@ $SoX64 = "WebTransportAddIn_x64-$Version.so"
 $DylibX64 = "WebTransportAddIn_x64-$Version.dylib"
 $ManifestPath = "out/Manifest.xml"
 $VersionedZipPath = "out/WebTransportAddIn-$Version.zip"
-$LegacyZipPath = "out/WebTransportAddIn.zip"
 
 Copy-Item target/i686-pc-windows-msvc/release/webtransport.dll "out/$DllX32" -Force
 Copy-Item target/x86_64-pc-windows-msvc/release/webtransport.dll "out/$DllX64" -Force
@@ -161,7 +160,6 @@ Copy-Item target/x86_64-apple-darwin/release/libwebtransport.dylib "out/$DylibX6
 "@ | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
 
 Compress-Archive -DestinationPath $VersionedZipPath -Path "out/$DllX64", "out/$DllX32", "out/$SoX32", "out/$SoX64", "out/$DylibX64", $ManifestPath -Force
-Copy-Item -LiteralPath $VersionedZipPath -Destination $LegacyZipPath -Force
 Copy-Item -LiteralPath $VersionedZipPath -Destination demo/Demo/Templates/Компонента/Ext/Template.bin -Force
 '''
 
@@ -176,7 +174,6 @@ SO_X64="WebTransportAddIn_x64-$VERSION.so"
 DYLIB_X64="WebTransportAddIn_x64-$VERSION.dylib"
 MANIFEST_PATH="out/Manifest.xml"
 VERSIONED_ZIP_PATH="out/WebTransportAddIn-$VERSION.zip"
-LEGACY_ZIP_PATH="out/WebTransportAddIn.zip"
 
 cp target/i686-pc-windows-gnu/release/webtransport.dll "out/$DLL_X32"
 cp target/x86_64-pc-windows-gnu/release/webtransport.dll "out/$DLL_X64"
@@ -196,7 +193,6 @@ cat > "$MANIFEST_PATH" <<EOF
 EOF
 
 zip -j -q "$VERSIONED_ZIP_PATH" "out/$DLL_X64" "out/$DLL_X32" "out/$SO_X32" "out/$SO_X64" "out/$DYLIB_X64" "$MANIFEST_PATH"
-cp "$VERSIONED_ZIP_PATH" "$LEGACY_ZIP_PATH"
 cp "$VERSIONED_ZIP_PATH" demo/Demo/Templates/Компонента/Ext/Template.bin
 '''
 
@@ -211,7 +207,6 @@ SO_X64="WebTransportAddIn_x64-$VERSION.so"
 DYLIB_X64="WebTransportAddIn_x64-$VERSION.dylib"
 MANIFEST_PATH="out/Manifest.xml"
 VERSIONED_ZIP_PATH="out/WebTransportAddIn-$VERSION.zip"
-LEGACY_ZIP_PATH="out/WebTransportAddIn.zip"
 
 cp target/i686-pc-windows-gnu/release/webtransport.dll "out/$DLL_X32"
 cp target/x86_64-pc-windows-gnu/release/webtransport.dll "out/$DLL_X64"
@@ -231,7 +226,6 @@ cat > "$MANIFEST_PATH" <<EOF
 EOF
 
 zip -j -q "$VERSIONED_ZIP_PATH" "out/$DLL_X64" "out/$DLL_X32" "out/$SO_X32" "out/$SO_X64" "out/$DYLIB_X64" "$MANIFEST_PATH"
-cp "$VERSIONED_ZIP_PATH" "$LEGACY_ZIP_PATH"
 cp "$VERSIONED_ZIP_PATH" demo/Demo/Templates/Компонента/Ext/Template.bin
 '''
 
