@@ -87,8 +87,17 @@ command = "cargo"
 args = ["build", "--release", "--target", "x86_64-unknown-linux-gnu"]
 
 [tasks.build-release-macos-64.linux]
-command = "cargo"
-args = ["zigbuild", "--release", "--target", "x86_64-apple-darwin"]
+script = '''
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp \
+  -e CARGO_HOME=/tmp/cargo \
+  -e CARGO_ZIGBUILD_CACHE_DIR=/tmp/cargo-zigbuild \
+  -v "${CARGO_MAKE_WORKING_DIRECTORY}:/io" \
+  -w /io \
+  ghcr.io/rust-cross/cargo-zigbuild \
+  cargo zigbuild --release --target x86_64-apple-darwin
+'''
 
 [tasks.build-release-macos-64.mac]
 command = "cargo"
