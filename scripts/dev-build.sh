@@ -39,11 +39,22 @@ build_component() {
 
 update_demo_component_template() {
   log "Updating demo template with component archive..."
-  [[ -f "$OUT_DIR/WebTransportAddIn_x64.so" ]] || die "Component not built: $OUT_DIR/WebTransportAddIn_x64.so"
+  local component_file
+  local uname_out
+  uname_out="$(uname -s)"
+  if [[ "$uname_out" == "Linux" ]]; then
+    component_file="$OUT_DIR/WebTransportAddIn_x64.so"
+  elif [[ "$uname_out" == "Darwin" ]]; then
+    component_file="$OUT_DIR/WebTransportAddIn_x64.dylib"
+  else
+    component_file="$OUT_DIR/WebTransportAddIn_x64.dll"
+  fi
+
+  [[ -f "$component_file" ]] || die "Component not built: $component_file"
   [[ -f "$ROOT_DIR/Manifest.xml" ]] || die "Missing Manifest.xml"
 
   mkdir -p "$(dirname "$DEMO_TEMPLATE_BIN")"
-  zip -j -q "$DEMO_COMPONENT_ZIP" "$OUT_DIR/WebTransportAddIn_x64.so" "$ROOT_DIR/Manifest.xml"
+  zip -j -q "$DEMO_COMPONENT_ZIP" "$component_file" "$ROOT_DIR/Manifest.xml"
   cp "$DEMO_COMPONENT_ZIP" "$DEMO_TEMPLATE_BIN"
   log "Template updated: $DEMO_TEMPLATE_BIN"
 }

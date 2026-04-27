@@ -10,6 +10,7 @@
 
 - [Индекс ADR](decisions/README.md)
 - [ADR-0002: Отказаться от внутренней эмуляции задач в MCP bridge](decisions/0002-drop-internal-task-emulation-in-mcp-bridge.md)
+- [ADR-0003: Добавить macOS x86_64 в release bundle внешней компоненты](decisions/0003-add-macos-x86-64-release-artifact.md)
 
 ## Правила
 

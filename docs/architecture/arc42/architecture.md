@@ -38,7 +38,7 @@
 | 1 | Совместимость с 1С | Разработчик 1С подключает один bundle и получает классы `ws`, `http`, `mcp` через `Новый("AddIn.*")` без отдельного демона или IPC слоя. |
 | 2 | Предсказуемость интеграции | Ошибки методов возвращаются как исключения/`ОписаниеОшибки`, а входящие запросы и события имеют стабильный JSON-формат. |
 | 3 | Поддержка длительных и потоковых сценариев | HTTP/SSE и MCP task-based вызовы работают без блокировки UI-логики 1С дольше одного синхронного вызова. |
-| 4 | Портируемость поставки | Сборка формирует bundle для Windows/Linux и x86/x64 с версией в имени: `WebTransportAddIn-{version}.zip` и `Manifest.xml`, который ссылается на DLL/SO с той же версией. |
+| 4 | Портируемость поставки | Сборка формирует bundle для Windows/Linux/macOS с версией в имени: `WebTransportAddIn-{version}.zip` и `Manifest.xml`, который ссылается на DLL/SO/DYLIB с той же версией. |
 | 5 | Расширяемость | MCP-слой позволяет регистрировать инструменты, ресурсы, шаблоны ресурсов и промпты без изменения транспортного ядра. |
 
 ### 1.3 Заинтересованные стороны
@@ -335,7 +335,7 @@ graph TB
 |------|----------|------------|
 | Рабочая станция/CI | Сборка native библиотеки | Rust toolchain, cargo, cargo-make |
 | Bundle archive | Пакет поставки | `out/WebTransportAddIn-{version}.zip` + generated `out/Manifest.xml` |
-| Платформа 1С | Среда исполнения внешней компоненты | Windows/Linux, 1С native add-in |
+| Платформа 1С | Среда исполнения внешней компоненты | Windows/Linux/macOS, 1С native add-in |
 | Demo processing | Тестовая внешняя обработка | `Demo.epf`, собирается через Designer |
 
 ### 7.2 Варианты артефактов
@@ -346,13 +346,14 @@ graph TB
 - `WebTransportAddIn_x64-{version}.dll`
 - `WebTransportAddIn_x32-{version}.so`
 - `WebTransportAddIn_x64-{version}.so`
+- `WebTransportAddIn_x64-{version}.dylib`
 - `Manifest.xml`
 
 Особенности:
 
-- Linux-скрипт в [Makefile.toml](/home/alko/develop/open-source/websocket1c/Makefile.toml) собирает цели `i686/x86_64` для Windows GNU и Linux GNU.
+- Shell-ветки в [Makefile.toml](/home/alko/develop/open-source/websocket1c/Makefile.toml) собирают цели `i686/x86_64` для Windows GNU и Linux GNU, а также `x86_64-apple-darwin` для macOS.
 - `pack-to-zip` вычисляет версию пакета через `cargo pkgid`, собирает `out/WebTransportAddIn-{version}.zip` и оставляет совместимый alias `out/WebTransportAddIn.zip`.
-- Во время релизной упаковки манифест генерируется в `out/Manifest.xml` и содержит имена DLL/SO с версией пакета; [Manifest.xml](/home/alko/develop/open-source/websocket1c/Manifest.xml) из репозитория остаётся шаблоном для локальных/dev сценариев.
+- Во время релизной упаковки манифест генерируется в `out/Manifest.xml` и содержит имена DLL/SO/DYLIB с версией пакета; [Manifest.xml](/home/alko/develop/open-source/websocket1c/Manifest.xml) из репозитория остаётся шаблоном для локальных/dev сценариев.
 - Скрипт [scripts/build-release.sh](/home/alko/develop/open-source/websocket1c/scripts/build-release.sh) по умолчанию ожидает архив с версией в имени и дополнительно обновляет шаблон компоненты внутри demo.
 - Скрипт [scripts/build-epf.sh](/home/alko/develop/open-source/websocket1c/scripts/build-epf.sh) требует локальную установленную платформу 1С и путь к инфобазе.
 
@@ -410,10 +411,12 @@ graph TB
 | Реализовать MCP через `rmcp` Streamable HTTP transport | Снижает объём собственной протокольной логики | Реализовано |
 | Хранить runtime state in-memory | Достаточно для embed-сценария внешней компоненты без отдельного persistence слоя | Реализовано |
 | Отказаться от внутренней эмуляции задач и оставить только стандартные MCP execution paths | Упрощает bridge с 1С и убирает component-specific semantics поверх MCP | Реализовано через ADR-0002 |
+| Включить macOS x86-64 в единый release bundle | Позволяет 1С на macOS загрузить `dylib` из того же ZIP/Manifest, что и Windows/Linux артефакты | Реализовано через ADR-0003 |
 
 Связанные ADR:
 
 - [ADR-0002: Отказаться от внутренней эмуляции задач в MCP bridge](/home/alko/develop/open-source/websocket1c/docs/decisions/0002-drop-internal-task-emulation-in-mcp-bridge.md)
+- [ADR-0003: Добавить macOS x86_64 в release bundle внешней компоненты](/home/alko/develop/open-source/websocket1c/docs/decisions/0003-add-macos-x86-64-release-artifact.md)
 
 ---
 
@@ -439,12 +442,12 @@ graph TD
 
 | Атрибут | Сценарий | Ожидаемое поведение |
 |---------|----------|---------------------|
-| Совместимость | Разработчик подключает ZIP bundle с версией в имени в 1С на Windows или Linux | Платформа загружает подходящий DLL/SO по путям из `Manifest.xml` внутри bundle |
+| Совместимость | Разработчик подключает ZIP bundle с версией в имени в 1С на Windows, Linux или macOS x86-64 | Платформа загружает подходящий DLL/SO/DYLIB по путям из `Manifest.xml` внутри bundle |
 | Надёжность | 1С не отвечает на HTTP-запрос вовремя | Клиент получает `504`, зависший waiter очищается |
 | Надёжность | Для неизвестного `taskId` приходит команда завершения | Метод возвращает `Ложь`, а не повреждает состояние сервера |
 | Расширяемость | Нужно добавить новый MCP tool | 1С регистрирует его через JSON-описание без модификации transport слоя |
 | Безопасность интеграции | MCP запрос приходит с неразрешённого Origin | Запрос отклоняется allow-list логикой |
-| Эксплуатация | Нужно выпустить новую версию пакета | Release pipeline собирает 4 бинарника, генерирует `Manifest.xml` с путями, содержащими версию пакета, и формирует `WebTransportAddIn-{version}.zip` |
+| Эксплуатация | Нужно выпустить новую версию пакета | Release pipeline собирает 5 бинарников, генерирует `Manifest.xml` с путями, содержащими версию пакета, и формирует `WebTransportAddIn-{version}.zip` |
 
 ---
 
