@@ -4,4 +4,6 @@ Cargo.lock
 *.log
 .env
 .codex/*
-.continue
+.continue.context/
+.context/
+BUILD_LOCAL.md

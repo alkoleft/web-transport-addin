@@ -1,13 +1,13 @@
 [package]
 name = "webtransport"
-version = "0.6.4"
+version = "0.7.4"
 edition = "2021"
 authors = ["alkoleft"]
 
 [dependencies]
 utf16_lit = "2.0.2"
 addin1c = "0.7"
-tokio = { version = "1.50.0", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros"] }
+tokio = { version = "1.50.0", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros", "process"] }
 tokio-tungstenite = "0.28.0"
 futures-util = "0.3.31"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -20,6 +20,14 @@ http-body-util = "0.1.3"
 tokio-util = { version = "0.7.18", default-features = false }
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 rmcp = { version = "1.1.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
+uuid = { version = "1", features = ["v4"] }
+gethostname = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Зависимости nix (signal/process) и windows-sys (PROCESS_TERMINATE) удалены
+# вместе с system_capability (ADR-0003 / ADR-0005) — addin больше не управляет
+# дочерними процессами, kill живёт в test_client tool `system_kill_pid`.
 
 [features]
 validate-schema = ["dep:jsonschema"]

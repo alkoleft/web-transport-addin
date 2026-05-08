@@ -293,12 +293,14 @@ fn start_mcp_server_with_listener(
             move || Ok(handler.clone())
         },
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig {
-            stateful_mode: true,
-            json_response: false,
-            sse_keep_alive: None,
-            sse_retry: None,
-            cancellation_token: CancellationToken::new(),
+        {
+            let mut cfg = StreamableHttpServerConfig::default();
+            cfg.stateful_mode = true;
+            cfg.json_response = false;
+            cfg.sse_keep_alive = None;
+            cfg.sse_retry = None;
+            cfg.cancellation_token = CancellationToken::new();
+            cfg
         },
     );
 

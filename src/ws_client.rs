@@ -92,9 +92,15 @@ pub(crate) fn connect(
     runtime.clone().block_on(async {
         let request_data = RequestData::try_new(address.get_string()?, json_headers.get_string()?)?;
         let request = WsRequest::try_from(request_data)?;
-        let (stream, _) = connect_async(request)
-            .await
-            .map_err(|error| format!("{error}"))?;
+        // Защита от зависшего HTTP/upgrade: на некоторых транспортах
+        // (например, Docker Desktop vpnkit) tokio_tungstenite не дочитывает
+        // ответ 101 и `connect_async` зависает бесконечно. 5 сек ≫ обычного
+        // RTT и времени upgrade'а; превышение — явный сигнал клиенту ретраить.
+        let connect_fut = connect_async(request);
+        let (stream, _) = match tokio::time::timeout(Duration::from_secs(5), connect_fut).await {
+            Ok(res) => res.map_err(|error| format!("{error}"))?,
+            Err(_) => return Err("connect timed out (5s waiting for WS upgrade)".to_string().into()),
+        };
         let (sender, receiver) = stream.split();
         *websocket = Some(WebSocketConnection { sender, receiver });
         return_value.set_bool(true);

@@ -8,7 +8,11 @@
 
 ## Состав и имена классов
 
-Компонента экспортирует 3 класса (имена для `Новый("AddIn.*")`):
+Компонента экспортирует следующие классы (имена для `Новый("AddIn.*")`):
 - `ws` — WebSocket‑клиент. См. [docs/ws.md](docs/ws.md).
 - `http` — HTTP/SSE сервер с событиями в 1С. См. [docs/http.md](docs/http.md).
 - `mcp` — MCP Streamable HTTP сервер (JSON‑only). См. [docs/mcp.md](docs/mcp.md).
+
+## Доработки форка
+
+Этот форк отличается от upstream `alkoleft/web-transport-addin`. Описание доработок, перечень новых/изменённых модулей и распределение ответственности между слоями — в **[FORK_CHANGES.md](FORK_CHANGES.md)**.

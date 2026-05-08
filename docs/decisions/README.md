@@ -3,3 +3,4 @@
 - [ADR-0001: Использовать `text/event-stream` для асинхронных MCP-вызовов инструментов](0001-use-sse-transport-for-async-mcp-calls.md) — superseded by [ADR-0002](0002-drop-internal-task-emulation-in-mcp-bridge.md)
 - [ADR-0002: Отказаться от внутренней эмуляции задач в MCP bridge](0002-drop-internal-task-emulation-in-mcp-bridge.md)
 - [ADR-0003: Добавить macOS x86_64 в release bundle внешней компоненты](0003-add-macos-x86-64-release-artifact.md)
+- [ADR-0004: Стратегия мока хоста внешней компоненты для тестов tunnel](0004-mock-strategy-for-addin-host-tests.md)
